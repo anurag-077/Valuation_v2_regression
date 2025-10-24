@@ -12,6 +12,7 @@ from pyproj import CRS, Transformer
 import json
 import logging
 import time
+from scipy.spatial import ConvexHull
 
 # Setup logging
 logging.basicConfig(
@@ -428,6 +429,32 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map"):
         marker=dict(size=14, opacity=0.8)
     )
     
+    # Add borders if single cluster
+    if cluster_num is not None:
+        points = filtered[['project_lng', 'project_lat']].values
+        if len(points) >= 3:
+            try:
+                hull = ConvexHull(points, qhull_options="QJ")  # Use QJ to joggle points
+                vertices = hull.vertices
+                lons = points[vertices, 0]
+                lats = points[vertices, 1]
+                lons = np.append(lons, lons[0])
+                lats = np.append(lats, lats[0])
+                fig.add_trace(
+                    go.Scattermapbox(
+                        lon=lons,
+                        lat=lats,
+                        mode='lines',
+                        line=dict(width=2, color='red'),
+                        fill='none',  # No fill to keep projects visible
+                        name="Cluster Boundary",
+                        hoverinfo='skip'
+                    )
+                )
+            except Exception as e:
+                logging.warning(f"Failed to compute convex hull for cluster {cluster_num}: {e}")
+                st.warning(f"Could not draw boundary for cluster {cluster_num} due to insufficient point variation.")
+    
     fig.update_layout(
         mapbox_style="open-street-map",
         margin=dict(t=60),
@@ -555,7 +582,7 @@ def main():
     
     with tab1:
         st.header("Cluster Explorer")
-        st.caption("Explore project clusters on a map based on geographic or categorical groupings and specific villages.")
+        st.caption("Explore project clusters on a map based on geographic or categorical groupings. Selecting a village shows all projects in clusters containing at least one project from that village.")
         col1, col2 = st.columns(2)
         
         with col1:
@@ -565,32 +592,64 @@ def main():
         with col2:
             villages = sorted(project_df['Village'].dropna().unique())
             selected_village = st.selectbox("Select Village", villages,
-                                          help="Choose a village to filter clusters.")
+                                          help="Choose a village to filter clusters. Shows all projects in clusters that include this village.")
+            # Get clusters that contain at least one project from the selected village
             filtered_df = project_df[project_df['Village'] == selected_village]
             clusters = sorted(filtered_df[cluster_type].dropna().unique())
             clusters = ['All'] + clusters  # Add "All" as the first option
             selected_cluster = st.selectbox("Cluster Number", clusters,
-                                          help="Choose a specific cluster number to visualize within the selected village, or select 'All' to see all clusters.")
+                                          help="Choose a specific cluster number to visualize all projects in that cluster, or select 'All' to see all relevant clusters.")
         
-        # Visualize all clusters for the selected village
+        # Visualize all clusters containing the selected village
         if selected_cluster == 'All':
-            filtered_df['hover_text'] = filtered_df.apply(
+            # Get all projects in clusters that have at least one project from the selected village
+            relevant_clusters = project_df[project_df[cluster_type].isin(clusters)]
+            relevant_clusters['hover_text'] = relevant_clusters.apply(
                 lambda row: f"<b>{row['Project_Name']}</b><br>₹{row['Mid_Rate']:.1f} per sqft<br>{row['Village']}", axis=1
             )
+            num_villages = len(relevant_clusters['Village'].unique())
             fig_map = px.scatter_mapbox(
-                filtered_df,
+                relevant_clusters,
                 lat='project_lat', lon='project_lng',
                 hover_name='hover_text',
                 color=cluster_type,  # Color by cluster type
                 color_discrete_sequence=px.colors.qualitative.Plotly,  # Distinct colors for each cluster
                 zoom=11,
                 height=500,
-                title=f"Cluster Map - All Projects in {selected_village}",
+                title=f"Cluster Map - All Projects in Clusters with {selected_village} (Spans {num_villages} Villages)",
                 labels={cluster_type: 'Cluster', 'Mid_Rate': 'Rate (₹ per sqft)'}
             )
             fig_map.update_traces(
                 marker=dict(size=14, opacity=0.8)
             )
+            # Add borders for each cluster
+            colors = px.colors.qualitative.Plotly
+            unique_clusters = relevant_clusters[cluster_type].unique()
+            for idx, cluster in enumerate(unique_clusters):
+                cluster_data = relevant_clusters[relevant_clusters[cluster_type] == cluster]
+                points = cluster_data[['project_lng', 'project_lat']].values
+                if len(points) >= 3:
+                    try:
+                        hull = ConvexHull(points, qhull_options="QJ")  # Use QJ to joggle points
+                        vertices = hull.vertices
+                        lons = points[vertices, 0]
+                        lats = points[vertices, 1]
+                        lons = np.append(lons, lons[0])
+                        lats = np.append(lats, lats[0])
+                        fig_map.add_trace(
+                            go.Scattermapbox(
+                                lon=lons,
+                                lat=lats,
+                                mode='lines',
+                                line=dict(width=2, color=colors[idx % len(colors)]),
+                                fill='none',  # No fill to keep projects visible
+                                name=f"Cluster {cluster} Boundary",
+                                hoverinfo='skip'
+                            )
+                        )
+                    except Exception as e:
+                        logging.warning(f"Failed to compute convex hull for cluster {cluster}: {e}")
+                        st.warning(f"Could not draw boundary for cluster {cluster} due to insufficient point variation.")
             fig_map.update_layout(
                 mapbox_style="open-street-map",
                 margin=dict(t=60),
@@ -605,16 +664,28 @@ def main():
                 )
             )
             fig_map.add_annotation(
-                text="Note: Points represent projects colored by their cluster.",
+                text="Note: Points represent projects colored by their cluster. Clusters include projects from selected village and others.",
                 xref="paper", yref="paper", x=0.01, y=0.01,
                 showarrow=False, font=dict(size=12, color="gray"),
                 bgcolor="white", bordercolor="gray", borderwidth=1
             )
             st.plotly_chart(fig_map, use_container_width=True)
+            if num_villages > 1:
+                st.info(f"These clusters span {num_villages} villages, including {selected_village}.")
         else:
-            fig_map = plot_cluster_map(filtered_df, cluster_type, selected_cluster, f"Cluster Map - Projects in {selected_village}")
+            # For specific cluster, use full project_df to show all projects in the cluster
+            full_filtered = project_df[project_df[cluster_type] == selected_cluster]
+            num_villages = len(full_filtered['Village'].unique())
+            title = f"Cluster Map - Cluster {selected_cluster}"
+            if num_villages > 1:
+                title += f" (Spans {num_villages} Villages)"
+            fig_map = plot_cluster_map(full_filtered, cluster_type, selected_cluster, title)
             if fig_map:
                 st.plotly_chart(fig_map, use_container_width=True)
+            if num_villages > 1:
+                st.info(f"This cluster spans {num_villages} villages, including {selected_village}.")
+            else:
+                st.caption(f"Showing projects in cluster {selected_cluster} from {selected_village}.")
         
         category_map = {'Cluster_LatLong': 'LatLong', 
                        'Cluster_LatLongCategory': 'LatLongCategory'}
@@ -750,7 +821,7 @@ def main():
                     zoom=14, height=500, center={"lat": lat, "lon": lon}
                 )
                 fig_amenity.update_traces(
-                    marker=dict(opacity=0.8, size=10)  # Adjusted marker style without 'line'
+                    marker=dict(opacity=0.8, size=10)
                 )
                 fig_amenity.add_trace(go.Scattermapbox(
                     lat=[lat], lon=[lon], mode='markers',
