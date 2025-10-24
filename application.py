@@ -6,10 +6,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
 import requests
-from shapely.geometry import Point, LineString, MultiPoint
-from shapely.ops import transform, unary_union
+from shapely.geometry import Point, LineString
+from shapely.ops import transform
 from pyproj import CRS, Transformer
-import alphashape
 import json
 import logging
 import time
@@ -388,8 +387,10 @@ def get_highways_within_radius(lat: float, lon: float) -> tuple:
         if not road_distances:
             return [], {"category": None, "category_label": None, "distance_m": None, "name": None}
 
+        # Sort by increase_pct (descending) and then distance_m (ascending)
         road_distances.sort(key=lambda r: (-r["increase_pct"], r["distance_m"]))
         nearest_biggest_highway = road_distances[0]
+        # For the all_highways table, sort by distance
         all_highways_sorted = sorted(road_distances, key=lambda r: r["distance_m"])
         return all_highways_sorted, nearest_biggest_highway
 
@@ -411,107 +412,40 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map"):
         lambda row: f"<b>{row['Project_Name']}</b><br>₹{row['Mid_Rate']:.1f} per sqft<br>{row['Village']}", axis=1
     )
     
-    # Initialize the Plotly figure
     fig = px.scatter_mapbox(
         filtered,
         lat='project_lat', lon='project_lng',
         hover_name='hover_text',
-        color='Mid_Rate',
-        color_continuous_scale='Viridis',  # Vibrant, professional color scale
+        color='Mid_Rate',  # Color by rate for visual appeal
+        color_continuous_scale='viridis',
         zoom=11,
-        height=600,
+        height=500,
         title=f"{title} - Projects in Cluster {cluster_num if cluster_num is not None else 'All'}",
         labels={'Mid_Rate': 'Rate (₹ per sqft)'}
     )
     
     fig.update_traces(
-        marker=dict(
-            size=14,
-            opacity=0.85,
-            symbol='circle',  # Consistent symbol for clarity
-        )
+        marker=dict(size=14, opacity=0.8)
     )
     
-    # Add cluster borders using alpha shapes
-    if cluster_num is None:
-        clusters = filtered[cluster_col].unique()
-        colors = px.colors.qualitative.Set2  # Vibrant yet soft colors
-        for idx, cluster in enumerate(clusters):
-            cluster_data = filtered[filtered[cluster_col] == cluster]
-            if len(cluster_data) >= 3:
-                points = [(lon, lat) for lon, lat in zip(cluster_data['project_lng'], cluster_data['project_lat'])]
-                alpha_shape = alphashape.alphashape(points, alpha=1000)
-                if alpha_shape.geom_type == 'Polygon':
-                    lons, lats = alpha_shape.exterior.coords.xy
-                    lons = list(lons)
-                    lats = list(lats)
-                    avg_rate = cluster_data['Mid_Rate'].mean()
-                    hover_text = f"Cluster {cluster}<br>Avg Rate: ₹{avg_rate:.1f} per sqft<br>Projects: {len(cluster_data)}"
-                    fig.add_trace(
-                        go.Scattermapbox(
-                            lon=lons,
-                            lat=lats,
-                            mode='lines',
-                            line=dict(width=3, color=colors[idx % len(colors)]),
-                            fill='toself',
-                            fillcolor=colors[idx % len(colors)],
-                            opacity=0.25,
-                            name=f"Cluster {cluster}",
-                            hovertemplate=hover_text,
-                            hoverinfo='text'
-                        )
-                    )
-    
-    # Dynamic zoom adjustment
-    if not filtered.empty:
-        lat_range = filtered['project_lat'].max() - filtered['project_lat'].min()
-        lon_range = filtered['project_lng'].max() - filtered['project_lng'].min()
-        zoom = 12 - np.log10(max(lat_range, lon_range) * 100) if max(lat_range, lon_range) > 0 else 11
-        fig.update_layout(
-            mapbox=dict(
-                style="carto-positron",  # Clean, modern map style
-                center=dict(
-                    lat=filtered['project_lat'].mean(),
-                    lon=filtered['project_lng'].mean()
-                ),
-                zoom=max(10, min(14, zoom))
-            ),
-            margin=dict(t=80, b=20, l=20, r=20),
-            hovermode='closest',
-            title=dict(
-                text=f"{title} - Projects in Cluster {cluster_num if cluster_num is not None else 'All'}",
-                x=0.5,
-                y=0.98,
-                xanchor='center',
-                yanchor='top',
-                font=dict(size=20, color='#333333', family="Arial"),
-                pad=dict(b=10)
-            ),
-            legend=dict(
-                title="Rate (₹ per sqft) / Clusters",
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1,
-                bgcolor="rgba(255,255,255,0.95)",
-                bordercolor="#333333",
-                borderwidth=1,
-                font=dict(size=12)
-            )
+    fig.update_layout(
+        mapbox_style="open-street-map",
+        margin=dict(t=60),
+        hovermode='closest',
+        legend=dict(
+            title="Rate (₹ per sqft)",
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
         )
-    else:
-        fig.update_layout(
-            mapbox_style="carto-positron",
-            margin=dict(t=80),
-            hovermode='closest'
-        )
-    
+    )
     fig.add_annotation(
-        text="Note: Points represent projects colored by rate; smooth borders outline clusters (visible for 3+ points).",
+        text="Note: Points represent projects colored by their mid rate.",
         xref="paper", yref="paper", x=0.01, y=0.01,
-        showarrow=False, font=dict(size=12, color="#666666"),
-        bgcolor="rgba(255,255,255,0.95)", bordercolor="#333333", borderwidth=1
+        showarrow=False, font=dict(size=12, color="gray"),
+        bgcolor="white", bordercolor="gray", borderwidth=1
     )
     return fig
 
@@ -574,17 +508,17 @@ def create_regression_plot(equation, slope, intercept, x_label, y_label, n, x_ra
     
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=y, mode='lines', 
-                           line=dict(color='#6366f1', width=4, dash='solid')))
+                           line=dict(color='#1f77b4', width=4, dash='solid')))
     
     fig.add_annotation(
         x=0.98, y=0.98, xref="paper", yref="paper",
         text=f"<b>{equation}</b><br>Sample Size: {n}",
         showarrow=False, font=dict(size=12), 
-        bgcolor="rgba(255,255,255,0.95)", bordercolor="#6366f1", borderwidth=1
+        bgcolor="white", bordercolor="#1f77b4", borderwidth=1
     )
     
     fig.update_layout(
-        title=dict(text=title, font=dict(size=16, color='#333333')),
+        title=dict(text=title, font=dict(size=16)),
         xaxis_title=x_label,
         yaxis_title=y_label,
         height=280,
@@ -596,8 +530,8 @@ def create_regression_plot(equation, slope, intercept, x_label, y_label, n, x_ra
     fig.add_annotation(
         text="Note: Line represents the regression model fit.",
         xref="paper", yref="paper", x=0.01, y=0.01,
-        showarrow=False, font=dict(size=12, color="#666666"),
-        bgcolor="rgba(255,255,255,0.95)", bordercolor="#333333", borderwidth=1
+        showarrow=False, font=dict(size=12, color="gray"),
+        bgcolor="white", bordercolor="gray", borderwidth=1
     )
     return fig
 
@@ -605,11 +539,10 @@ def main():
     st.set_page_config(page_title="Valuation Analyzer Pro", layout="wide")
     
     st.markdown("""
-    <div style='text-align: center; background: linear-gradient(90deg, #6366f1 0%, #a855f7 100%); 
-                padding: 30px; border-radius: 15px; color: white; margin-bottom: 30px;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);'>
+    <div style='text-align: center; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); 
+                padding: 30px; border-radius: 20px; color: white; margin-bottom: 30px;'>
         <h1 style='margin: 0; font-size: 2.5em;'>Valuation Analyzer Pro</h1>
-        <p style='margin: 10px 0 0 0; font-size: 1.1em;'>Explore property clusters with vibrant maps and detailed valuation insights.</p>
+        <p style='margin: 10px 0 0 0; font-size: 1.1em;'>Interactive tool for analyzing property valuations based on location, amenities, highways, and regression models.</p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -622,22 +555,22 @@ def main():
     
     with tab1:
         st.header("Cluster Explorer")
-        st.caption("Visualize project clusters with smooth, vibrant boundaries, colored by property rates.")
+        st.caption("Explore project clusters on a map based on geographic or categorical groupings and specific villages.")
         col1, col2 = st.columns(2)
         
         with col1:
             cluster_type = st.selectbox("Cluster Type", 
                                       ['Cluster_LatLong', 'Cluster_LatLongCategory'],
-                                      help="Select clustering: LatLong (geographic) or LatLongCategory (geographic + categorical).")
+                                      help="Select the type of clustering: LatLong (geographic) or LatLongCategory (geographic and categorical).")
         with col2:
             villages = sorted(project_df['Village'].dropna().unique())
             selected_village = st.selectbox("Select Village", villages,
                                           help="Choose a village to filter clusters.")
             filtered_df = project_df[project_df['Village'] == selected_village]
             clusters = sorted(filtered_df[cluster_type].dropna().unique())
-            clusters = ['All'] + clusters
+            clusters = ['All'] + clusters  # Add "All" as the first option
             selected_cluster = st.selectbox("Cluster Number", clusters,
-                                          help="Select a cluster number or 'All' to view all clusters in the village.")
+                                          help="Choose a specific cluster number to visualize within the selected village, or select 'All' to see all clusters.")
         
         # Visualize all clusters for the selected village
         if selected_cluster == 'All':
@@ -648,97 +581,34 @@ def main():
                 filtered_df,
                 lat='project_lat', lon='project_lng',
                 hover_name='hover_text',
-                color=cluster_type,
-                color_discrete_sequence=px.colors.qualitative.Set2,
+                color=cluster_type,  # Color by cluster type
+                color_discrete_sequence=px.colors.qualitative.Plotly,  # Distinct colors for each cluster
                 zoom=11,
-                height=600,
+                height=500,
                 title=f"Cluster Map - All Projects in {selected_village}",
                 labels={cluster_type: 'Cluster', 'Mid_Rate': 'Rate (₹ per sqft)'}
             )
-            # Add cluster borders using alpha shapes
-            clusters = filtered_df[cluster_type].unique()
-            colors = px.colors.qualitative.Set2
-            for idx, cluster in enumerate(clusters):
-                cluster_data = filtered_df[filtered_df[cluster_type] == cluster]
-                if len(cluster_data) >= 3:
-                    points = [(lon, lat) for lon, lat in zip(cluster_data['project_lng'], cluster_data['project_lat'])]
-                    alpha_shape = alphashape.alphashape(points, alpha=1000)
-                    if alpha_shape.geom_type == 'Polygon':
-                        lons, lats = alpha_shape.exterior.coords.xy
-                        lons = list(lons)
-                        lats = list(lats)
-                        avg_rate = cluster_data['Mid_Rate'].mean()
-                        hover_text = f"Cluster {cluster}<br>Avg Rate: ₹{avg_rate:.1f} per sqft<br>Projects: {len(cluster_data)}"
-                        fig_map.add_trace(
-                            go.Scattermapbox(
-                                lon=lons,
-                                lat=lats,
-                                mode='lines',
-                                line=dict(width=3, color=colors[idx % len(colors)]),
-                                fill='toself',
-                                fillcolor=colors[idx % len(colors)],
-                                opacity=0.25,
-                                name=f"Cluster {cluster}",
-                                hovertemplate=hover_text,
-                                hoverinfo='text'
-                            )
-                        )
             fig_map.update_traces(
-                marker=dict(
-                    size=14,
-                    opacity=0.85,
-                    symbol='circle'
+                marker=dict(size=14, opacity=0.8)
+            )
+            fig_map.update_layout(
+                mapbox_style="open-street-map",
+                margin=dict(t=60),
+                hovermode='closest',
+                legend=dict(
+                    title="Clusters",
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
                 )
             )
-            # Dynamic zoom adjustment
-            if not filtered_df.empty:
-                lat_range = filtered_df['project_lat'].max() - filtered_df['project_lat'].min()
-                lon_range = filtered_df['project_lng'].max() - filtered_df['project_lng'].min()
-                zoom = 12 - np.log10(max(lat_range, lon_range) * 100) if max(lat_range, lon_range) > 0 else 11
-                fig_map.update_layout(
-                    mapbox=dict(
-                        style="carto-positron",
-                        center=dict(
-                            lat=filtered_df['project_lat'].mean(),
-                            lon=filtered_df['project_lng'].mean()
-                        ),
-                        zoom=max(10, min(14, zoom))
-                    ),
-                    margin=dict(t=80, b=20, l=20, r=20),
-                    hovermode='closest',
-                    title=dict(
-                        text=f"Cluster Map - All Projects in {selected_village}",
-                        x=0.5,
-                        y=0.98,
-                        xanchor='center',
-                        yanchor='top',
-                        font=dict(size=20, color='#333333', family="Arial"),
-                        pad=dict(b=10)
-                    ),
-                    legend=dict(
-                        title="Clusters",
-                        orientation="h",
-                        yanchor="bottom",
-                        y=1.02,
-                        xanchor="right",
-                        x=1,
-                        bgcolor="rgba(255,255,255,0.95)",
-                        bordercolor="#333333",
-                        borderwidth=1,
-                        font=dict(size=12)
-                    )
-                )
-            else:
-                fig_map.update_layout(
-                    mapbox_style="carto-positron",
-                    margin=dict(t=80),
-                    hovermode='closest'
-                )
             fig_map.add_annotation(
-                text="Note: Points represent projects colored by cluster; smooth borders outline clusters (visible for 3+ points).",
+                text="Note: Points represent projects colored by their cluster.",
                 xref="paper", yref="paper", x=0.01, y=0.01,
-                showarrow=False, font=dict(size=12, color="#666666"),
-                bgcolor="rgba(255,255,255,0.95)", bordercolor="#333333", borderwidth=1
+                showarrow=False, font=dict(size=12, color="gray"),
+                bgcolor="white", bordercolor="gray", borderwidth=1
             )
             st.plotly_chart(fig_map, use_container_width=True)
         else:
@@ -750,7 +620,7 @@ def main():
                        'Cluster_LatLongCategory': 'LatLongCategory'}
         category = category_map.get(cluster_type, 'LatLong')
         st.subheader("Regression Analysis")
-        st.caption("Regression models showing relationships between amenity scores, road categories, and rates.")
+        st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate.")
         if selected_cluster != 'All':
             show_regression_visuals(regression_data, selected_cluster, category)
         else:
@@ -758,11 +628,11 @@ def main():
     
     with tab2:
         st.header("Location Analyzer")
-        st.caption("Analyze a location to evaluate nearby highways, amenities, and predicted rates.")
+        st.caption("Analyze a specific location to evaluate nearby highways, amenities, and predicted property rates.")
         
         with st.sidebar:
             st.markdown("### Amenity Weights")
-            st.caption("Adjust weights for amenity categories to influence the score.")
+            st.caption("Adjust the weights for different amenity categories to influence the amenity score calculation.")
             categories = list(DEFAULT_WEIGHTS.keys())
             custom_weights = {}
             total_weight = 0
@@ -771,7 +641,7 @@ def main():
                 weight = st.number_input(
                     cat, min_value=0.0, max_value=1.0, value=DEFAULT_WEIGHTS[cat],
                     step=0.01, format="%.2f", key=f"wt_{cat}",
-                    help=f"Weight for {cat} amenities (0.0 to 1.0). Higher weights increase impact."
+                    help=f"Weight for {cat} amenities (0.0 to 1.0). Higher weights increase their impact on the amenity score."
                 )
                 custom_weights[cat] = weight
                 total_weight += weight
@@ -783,7 +653,7 @@ def main():
             st.markdown("**Coordinates**")
         with col2:
             coord_input = st.text_input("", value="18.5530, 73.7589",
-                                      help="Enter coordinates: latitude, longitude (e.g., 18.5530, 73.7589)")
+                                      help="Enter coordinates in the format: latitude, longitude (e.g., 18.5530, 73.7589)")
         
         try:
             lat, lon = map(float, coord_input.split(','))
@@ -819,7 +689,7 @@ def main():
             
             # 3. Display All Highways
             st.markdown("### Nearby Highways (200m Radius)")
-            st.caption("Highways within 200m, sourced from OpenStreetMap, sorted by proximity.")
+            st.caption("List of highways within 200 meters, sourced from OpenStreetMap, sorted by proximity.")
             if all_highways:
                 highway_df = pd.DataFrame(all_highways)
                 highway_df = highway_df[['name', 'highway', 'category', 'category_label', 'distance_m']].rename(
@@ -833,7 +703,7 @@ def main():
                 )
                 highway_df['Distance (m)'] = highway_df['Distance (m)'].round(1)
                 styled_df = highway_df.style.set_table_styles([
-                    {'selector': 'thead th', 'props': [('background-color', '#6366f1'), ('color', 'white'), ('font-weight', 'bold')]},
+                    {'selector': 'thead th', 'props': [('background-color', '#667eea'), ('color', 'white'), ('font-weight', 'bold')]},
                     {'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}
                 ]).format({'Distance (m)': '{:.1f}'})
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
@@ -843,7 +713,7 @@ def main():
             # 4. Amenity Analysis
             st.markdown("---")
             st.markdown("### Amenity Score Analysis (1km Radius)")
-            st.caption("Amenity score based on proximity and type within 1km.")
+            st.caption("Calculated amenity score based on the proximity and type of amenities within a 1km radius.")
             
             with st.spinner("Calculating amenities..."):
                 category_df = calculate_amenity_scores(lat, lon, all_amenities, current_weights)
@@ -859,7 +729,7 @@ def main():
             st.caption("Breakdown of amenity scores by category, including count and weighted contributions.")
             if not category_df.empty:
                 styled_category = category_df[['category', 'count', 'S_c', 's_c', 'weight', 'Weight × s_c']].round(3).style.set_table_styles([
-                    {'selector': 'thead th', 'props': [('background-color', '#6366f1'), ('color', 'white'), ('font-weight', 'bold')]},
+                    {'selector': 'thead th', 'props': [('background-color', '#667eea'), ('color', 'white'), ('font-weight', 'bold')]},
                     {'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}
                 ]).format(precision=3)
                 st.dataframe(styled_category, use_container_width=True, hide_index=True)
@@ -867,7 +737,7 @@ def main():
                 st.info("No amenity data available.")
             
             st.subheader("Amenities and Highways Map")
-            st.caption("Map showing amenities (colored by category) and highways (colored by type).")
+            st.caption("Interactive map displaying amenities (colored by category) and highways (colored lines by type) within the search radius. Hover over points or lines for details.")
             if not detailed_df.empty:
                 detailed_df['hover_text'] = detailed_df.apply(
                     lambda row: f"{row['name']}<br>{row['category']}<br>{row['distance_m']:.0f}m", axis=1
@@ -876,22 +746,19 @@ def main():
                 fig_amenity = px.scatter_mapbox(
                     detailed_df, lat='lat', lon='lng', hover_name='hover_text',
                     color='category', size='f_d', size_max=15,
-                    color_discrete_sequence=px.colors.qualitative.Set2,
-                    zoom=14, height=600, center={"lat": lat, "lon": lon}
+                    color_continuous_scale='viridis',  # Attractive color scale
+                    zoom=14, height=500, center={"lat": lat, "lon": lon}
                 )
                 fig_amenity.update_traces(
-                    marker=dict(
-                        size=12,
-                        opacity=0.85,
-                        symbol='circle'
-                    )
+                    marker=dict(opacity=0.8, size=10)  # Adjusted marker style without 'line'
                 )
                 fig_amenity.add_trace(go.Scattermapbox(
                     lat=[lat], lon=[lon], mode='markers',
-                    marker=dict(size=20, color='#ef4444', symbol='star'),
+                    marker=dict(size=20, color='red', symbol='star'),
                     name="Selected Location", hovertemplate="<b>Selected Location</b>"
                 ))
-                category_colors = {'A': '#22c55e', 'B': '#3b82f6', 'C': '#f97316', 'D': '#ef4444'}
+                # Add highways to the map with colored lines based on category
+                category_colors = {'A': 'green', 'B': 'blue', 'C': 'orange', 'D': 'red'}
                 for highway in all_highways:
                     if highway['geometry']:
                         lons, lats = zip(*highway['geometry'])
@@ -899,39 +766,29 @@ def main():
                             lon=lons,
                             lat=lats,
                             mode='lines',
-                            line=dict(width=3, color=category_colors.get(highway['category'], '#666666')),
+                            line=dict(width=3, color=category_colors.get(highway['category'], 'gray')),
                             name=f"{highway['name']} ({highway['category']})",
                             hovertemplate=f"Road: {highway['name']}<br>Category: {highway['category_label']}<extra></extra>"
                         ))
                 fig_amenity.update_layout(
-                    mapbox_style="carto-positron",
+                    mapbox_style="open-street-map",
                     legend=dict(
                         title="Legend",
                         yanchor="top",
                         y=0.99,
                         xanchor="left",
                         x=0.01,
-                        bgcolor="rgba(255,255,255,0.95)",
-                        bordercolor="#333333",
-                        borderwidth=1,
-                        font=dict(size=12)
+                        bgcolor="rgba(255,255,255,0.8)",
+                        bordercolor="gray",
+                        borderwidth=1
                     ),
-                    margin=dict(l=20, r=20, t=80, b=20),
-                    title=dict(
-                        text="Amenities and Highways Map",
-                        x=0.5,
-                        y=0.98,
-                        xanchor='center',
-                        yanchor='top',
-                        font=dict(size=20, color='#333333', family="Arial"),
-                        pad=dict(b=10)
-                    )
+                    margin=dict(l=0, r=0, t=0, b=0)
                 )
                 fig_amenity.add_annotation(
                     text="Note: Amenities are colored by category; highways by type (A: green, B: blue, C: orange, D: red).",
                     xref="paper", yref="paper", x=0.01, y=0.01,
-                    showarrow=False, font=dict(size=12, color="#666666"),
-                    bgcolor="rgba(255,255,255,0.95)", bordercolor="#333333", borderwidth=1
+                    showarrow=False, font=dict(size=12, color="gray"),
+                    bgcolor="white", bordercolor="gray", borderwidth=1
                 )
                 st.plotly_chart(fig_amenity, use_container_width=True)
             else:
@@ -940,7 +797,7 @@ def main():
             # 5. Cluster Map
             if dist_km >= 0.5:
                 st.markdown("### Nearest Cluster Projects")
-                st.caption("Map of projects in the nearest cluster, showing locations and rates.")
+                st.caption("Map of projects in the nearest cluster, showing their locations and rates.")
                 for col, clus in cluster_info.items():
                     if pd.notna(clus):
                         fig = plot_cluster_map(project_df, col, clus, f"Nearest {col}: {clus}")
@@ -952,19 +809,19 @@ def main():
             selected_cluster = cluster_info.get('Cluster_LatLong', cluster_info.get('Cluster_LatLongCategory'))
             if pd.notna(selected_cluster):
                 st.markdown("### Regression Analysis")
-                st.caption("Regression models showing relationships between amenity scores, road categories, and rates.")
+                st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate.")
                 category = 'LatLong' if 'Cluster_LatLong' in cluster_info else 'LatLongCategory'
                 show_regression_visuals(regression_data, selected_cluster, category)
             
             # 7. Valuation Prediction
             st.markdown("### Valuation Prediction")
-            st.caption("Estimated property rate per square foot based on regression models.")
+            st.caption("Estimated property rate per square foot based on regression models using amenity score and road category.")
             
             highway_map = {'A': 1, 'B': 2, 'C': 3, 'D': 4}
             road = highway_map.get(nearest_biggest_highway['category'], 2)
             predicted_amenity = float(category_df['total_score'].iloc[0]) if not category_df.empty else 0.0
             
-            # LatLong Cluster Prediction
+            # LatLong Cluster Prediction using Both (amenity + road)
             latlong_pred = 'N/A'
             latlong_eq = 'N/A'
             sheet_latlong = 'LatLong_Both_vs_Rate'
@@ -975,7 +832,7 @@ def main():
                     latlong_pred = row['Slope_Amenity'] * predicted_amenity + row['Slope_RoadCat'] * road + row['Intercept']
                     latlong_eq = row['Equation']
             
-            # LatLongCategory Cluster Prediction
+            # LatLongCategory Cluster Prediction using Amenity only
             category_pred = 'N/A'
             category_eq = 'N/A'
             sheet_category = 'LatLongCategory_Amenity_vs_Rate'
