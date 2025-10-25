@@ -110,17 +110,14 @@ def load_project_data():
         st.stop()
     df = pd.read_excel(file)
     
-    # Print column names for debugging
     print("Columns in project_df:", df.columns.tolist())
     
-    # Attempt to rename common latitude/longitude columns
     df = df.rename(columns={
         'Latitude': 'project_lat', 'longitude': 'project_lng',
         'lat': 'project_lat', 'lng': 'project_lng',
         'Project_Latitude': 'project_lat', 'Project_Longitude': 'project_lng'
     })
     
-    # Validate required columns
     required_columns = ['project_lat', 'project_lng', 'Project_Name', 'Mid_Rate', 'Village', 'Cluster_LatLong']
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
@@ -388,10 +385,8 @@ def get_highways_within_radius(lat: float, lon: float) -> tuple:
         if not road_distances:
             return [], {"category": None, "category_label": None, "distance_m": None, "name": None}
 
-        # Sort by increase_pct (descending) and then distance_m (ascending)
         road_distances.sort(key=lambda r: (-r["increase_pct"], r["distance_m"]))
         nearest_biggest_highway = road_distances[0]
-        # For the all_highways table, sort by distance
         all_highways_sorted = sorted(road_distances, key=lambda r: r["distance_m"])
         return all_highways_sorted, nearest_biggest_highway
 
@@ -399,7 +394,7 @@ def get_highways_within_radius(lat: float, lon: float) -> tuple:
         logging.error(f"Error querying roads for lat={lat}, lon={lon}: {e}")
         return [], {"category": None, "category_label": None, "distance_m": None, "name": None}
 
-def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map"):
+def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map", subject_lat=None, subject_lon=None):
     filtered = df.copy()
     
     if cluster_num is not None:
@@ -417,7 +412,7 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map"):
         filtered,
         lat='project_lat', lon='project_lng',
         hover_name='hover_text',
-        color='Mid_Rate',  # Color by rate for visual appeal
+        color='Mid_Rate',
         color_continuous_scale='viridis',
         zoom=11,
         height=500,
@@ -429,12 +424,11 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map"):
         marker=dict(size=14, opacity=0.8)
     )
     
-    # Add borders if single cluster
     if cluster_num is not None:
         points = filtered[['project_lng', 'project_lat']].values
         if len(points) >= 3:
             try:
-                hull = ConvexHull(points, qhull_options="QJ")  # Use QJ to joggle points
+                hull = ConvexHull(points, qhull_options="QJ")
                 vertices = hull.vertices
                 lons = points[vertices, 0]
                 lats = points[vertices, 1]
@@ -446,7 +440,7 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map"):
                         lat=lats,
                         mode='lines',
                         line=dict(width=2, color='red'),
-                        fill='none',  # No fill to keep projects visible
+                        fill='none',
                         name="Cluster Boundary",
                         hoverinfo='skip'
                     )
@@ -455,17 +449,30 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map"):
                 logging.warning(f"Failed to compute convex hull for cluster {cluster_num}: {e}")
                 st.warning(f"Could not draw boundary for cluster {cluster_num} due to insufficient point variation.")
     
+    if subject_lat is not None and subject_lon is not None:
+        fig.add_trace(go.Scattermapbox(
+            lat=[subject_lat],
+            lon=[subject_lon],
+            mode='markers',
+            marker=dict(size=20, color='yellow', symbol='star'),
+            name="Subject Location",
+            hovertemplate="<b>Subject Location</b>"
+        ))
+    
     fig.update_layout(
         mapbox_style="open-street-map",
-        margin=dict(t=60),
+        margin=dict(t=60, b=60),
         hovermode='closest',
         legend=dict(
             title="Rate (₹ per sqft)",
             orientation="h",
             yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
+            y=-0.1,
+            xanchor="center",
+            x=0.5,
+            bgcolor="rgba(255,255,255,0.9)",
+            bordercolor="gray",
+            borderwidth=1
         )
     )
     fig.add_annotation(
@@ -563,7 +570,43 @@ def create_regression_plot(equation, slope, intercept, x_label, y_label, n, x_ra
     return fig
 
 def main():
-    st.set_page_config(page_title="Valuation Analyzer Pro", layout="wide")
+    st.set_page_config(page_title="Valuation Analyzer Pro", layout="wide", initial_sidebar_state="expanded")
+    
+    st.markdown("""
+    <style>
+    [data-testid="stAppViewContainer"] {
+        background-color: white;
+        color: black;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #f8f9fa;
+    }
+    h1, h2, h3, h4, h5, h6 {
+        color: black !important;
+    }
+    .stMarkdown, .stCaption {
+        color: black;
+    }
+    .stButton > button {
+        background-color: #007bff;
+        color: white;
+    }
+    .stSelectbox div, .stTextInput div {
+        background-color: white;
+        color: black;
+    }
+    .dataframe {
+        background-color: white;
+    }
+    body {
+        color: black;
+        background-color: white;
+    }
+    section[data-testid="stSidebar"] > div {
+        background-color: #f8f9fa;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     
     st.markdown("""
     <div style='text-align: center; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); 
@@ -593,17 +636,14 @@ def main():
             villages = sorted(project_df['Village'].dropna().unique())
             selected_village = st.selectbox("Select Village", villages,
                                           help="Choose a village to filter clusters. Shows all projects in clusters that include this village.")
-            # Get clusters that contain at least one project from the selected village
             filtered_df = project_df[project_df['Village'] == selected_village]
             clusters = sorted(filtered_df[cluster_type].dropna().unique())
-            clusters = ['All'] + clusters  # Add "All" as the first option
+            clusters = ['All'] + clusters
             selected_cluster = st.selectbox("Cluster Number", clusters,
                                           help="Choose a specific cluster number to visualize all projects in that cluster, or select 'All' to see all relevant clusters.")
         
-        # Visualize all clusters containing the selected village
         if selected_cluster == 'All':
-            # Get all projects in clusters that have at least one project from the selected village
-            relevant_clusters = project_df[project_df[cluster_type].isin(clusters)]
+            relevant_clusters = project_df[project_df[cluster_type].isin(clusters[1:])]
             relevant_clusters['hover_text'] = relevant_clusters.apply(
                 lambda row: f"<b>{row['Project_Name']}</b><br>₹{row['Mid_Rate']:.1f} per sqft<br>{row['Village']}", axis=1
             )
@@ -612,8 +652,8 @@ def main():
                 relevant_clusters,
                 lat='project_lat', lon='project_lng',
                 hover_name='hover_text',
-                color=cluster_type,  # Color by cluster type
-                color_discrete_sequence=px.colors.qualitative.Plotly,  # Distinct colors for each cluster
+                color=cluster_type,
+                color_discrete_sequence=px.colors.qualitative.Plotly,
                 zoom=11,
                 height=500,
                 title=f"Cluster Map - All Projects in Clusters with {selected_village} (Spans {num_villages} Villages)",
@@ -622,7 +662,6 @@ def main():
             fig_map.update_traces(
                 marker=dict(size=14, opacity=0.8)
             )
-            # Add borders for each cluster
             colors = px.colors.qualitative.Plotly
             unique_clusters = relevant_clusters[cluster_type].unique()
             for idx, cluster in enumerate(unique_clusters):
@@ -630,7 +669,7 @@ def main():
                 points = cluster_data[['project_lng', 'project_lat']].values
                 if len(points) >= 3:
                     try:
-                        hull = ConvexHull(points, qhull_options="QJ")  # Use QJ to joggle points
+                        hull = ConvexHull(points, qhull_options="QJ")
                         vertices = hull.vertices
                         lons = points[vertices, 0]
                         lats = points[vertices, 1]
@@ -642,7 +681,7 @@ def main():
                                 lat=lats,
                                 mode='lines',
                                 line=dict(width=2, color=colors[idx % len(colors)]),
-                                fill='none',  # No fill to keep projects visible
+                                fill='none',
                                 name=f"Cluster {cluster} Boundary",
                                 hoverinfo='skip'
                             )
@@ -652,15 +691,18 @@ def main():
                         st.warning(f"Could not draw boundary for cluster {cluster} due to insufficient point variation.")
             fig_map.update_layout(
                 mapbox_style="open-street-map",
-                margin=dict(t=60),
+                margin=dict(t=60, b=60),
                 hovermode='closest',
                 legend=dict(
                     title="Clusters",
                     orientation="h",
                     yanchor="bottom",
-                    y=1.02,
-                    xanchor="right",
-                    x=1
+                    y=-0.1,
+                    xanchor="center",
+                    x=0.5,
+                    bgcolor="rgba(255,255,255,0.9)",
+                    bordercolor="gray",
+                    borderwidth=1
                 )
             )
             fig_map.add_annotation(
@@ -673,7 +715,6 @@ def main():
             if num_villages > 1:
                 st.info(f"These clusters span {num_villages} villages, including {selected_village}.")
         else:
-            # For specific cluster, use full project_df to show all projects in the cluster
             full_filtered = project_df[project_df[cluster_type] == selected_cluster]
             num_villages = len(full_filtered['Village'].unique())
             title = f"Cluster Map - Cluster {selected_cluster}"
@@ -735,10 +776,8 @@ def main():
         if st.button("Analyze Location", type="primary", use_container_width=True):
             current_weights = {cat: st.session_state[f"wt_{cat}"] for cat in categories}
             
-            # 1. Find Cluster
             cluster_info, dist_km, nearest_project = find_nearest_cluster(project_df, lat, lon)
             
-            # 2. Find Highways
             with st.spinner("Querying nearby highways..."):
                 all_highways, nearest_biggest_highway = get_highways_within_radius(lat, lon)
             
@@ -758,7 +797,6 @@ def main():
                 else:
                     st.metric("Nearest Major Highway", "None found")
             
-            # 3. Display All Highways
             st.markdown("### Nearby Highways (200m Radius)")
             st.caption("List of highways within 200 meters, sourced from OpenStreetMap, sorted by proximity.")
             if all_highways:
@@ -781,7 +819,6 @@ def main():
             else:
                 st.info("No highways found within 200m.")
             
-            # 4. Amenity Analysis
             st.markdown("---")
             st.markdown("### Amenity Score Analysis (1km Radius)")
             st.caption("Calculated amenity score based on the proximity and type of amenities within a 1km radius.")
@@ -807,29 +844,98 @@ def main():
             else:
                 st.info("No amenity data available.")
             
+            # Amenities and Highways Map (Enhanced Debugging)
+           # Amenities and Highways Map (Enhanced Debugging and Fix)
             st.subheader("Amenities and Highways Map")
-            st.caption("Interactive map displaying amenities (colored by category) and highways (colored lines by type) within the search radius. Hover over points or lines for details.")
+            st.caption("Interactive map displaying amenities (colored by category), highways (colored lines by type), and the subject location (red star) within a 1km radius. Hover for details.")
+
+            # Validate and log coordinates
+            try:
+                lat = float(lat)
+                lon = float(lon)
+                print(f"Validated subject location coordinates: lat={lat}, lon={lon}")
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError("Coordinates out of valid range")
+            except (ValueError, TypeError) as e:
+                st.error(f"Invalid coordinates: {e}. Using default: 18.5530, 73.7589")
+                lat, lon = 18.5530, 73.7589
+                print(f"Fallback coordinates: lat={lat}, lon={lon}")
+
+            # Test standalone map with subject location
+            # Debug: Standalone Subject Location Map
+            st.subheader("Debug: Standalone Subject Location Map")
+            st.caption("This map tests the rendering of the subject location marker using the entered coordinates.")
+
+            # Validate and log coordinates
+            try:
+                lat = float(lat)
+                lon = float(lon)
+                print(f"Validated subject location coordinates: lat={lat}, lon={lon}")
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError("Coordinates out of valid range")
+            except (ValueError, TypeError) as e:
+                st.error(f"Invalid coordinates: {e}. Using default: 18.5530, 73.7589")
+                lat, lon = 18.5530, 73.7589
+                print(f"Fallback coordinates: lat={lat}, lon={lon}")
+
+            # Create and log standalone map
+            fig_test = go.Figure()
+            print("Adding test subject location marker")
+            fig_test.add_trace(go.Scattermapbox(
+                lat=[lat], 
+                lon=[lon], 
+                mode='markers',
+                marker=dict(size=30, color='red', symbol='star', opacity=1.0),
+                name="Test Subject Location",
+                hovertemplate="<b>Test Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
+            ))
+            print(f"Trace added: lat={lat}, lon={lon}, type={type(fig_test.data[0]).__name__}")
+
+            # Force map rendering with explicit center and zoom
+            fig_test.update_layout(
+                mapbox_style="open-street-map",
+                mapbox=dict(center=dict(lat=lat, lon=lon), zoom=12, pitch=0, bearing=0),  # Explicit pitch and bearing
+                height=400,
+                margin=dict(l=20, r=20, t=40, b=20),
+                showlegend=True
+            )
+            print("Layout updated. Rendering map...")
+            st.plotly_chart(fig_test, use_container_width=True)
+            print("Standalone test map rendered. Checking data length:", len(fig_test.data))
+
+            # Amenities and Highways Map (Simplified with Debug)
+            st.subheader("Amenities and Highways Map")
+            st.caption("Interactive map displaying amenities (colored by category), highways (colored lines by type), and the subject location (red star) within a 1km radius. Hover for details.")
+
             if not detailed_df.empty:
+                print(f"Amenities found: {len(detailed_df)}")
                 detailed_df['hover_text'] = detailed_df.apply(
                     lambda row: f"{row['name']}<br>{row['category']}<br>{row['distance_m']:.0f}m", axis=1
                 )
                 
                 fig_amenity = px.scatter_mapbox(
-                    detailed_df, lat='lat', lon='lng', hover_name='hover_text',
-                    color='category', size='f_d', size_max=15,
-                    color_continuous_scale='viridis',  # Attractive color scale
-                    zoom=14, height=500, center={"lat": lat, "lon": lon}
+                    detailed_df, 
+                    lat='lat', 
+                    lon='lng', 
+                    hover_name='hover_text',
+                    color='category',
+                    size='f_d', 
+                    size_max=12,
+                    color_discrete_sequence=px.colors.qualitative.Set2,
+                    zoom=12,
+                    height=600,
+                    center={"lat": lat, "lon": lon},
+                    title="Nearby Amenities and Highways"
                 )
+                
                 fig_amenity.update_traces(
-                    marker=dict(opacity=0.8, size=10)
+                    marker=dict(opacity=0.85, sizemin=6),
+                    hovertemplate="%{hovertext}<extra></extra>"
                 )
-                fig_amenity.add_trace(go.Scattermapbox(
-                    lat=[lat], lon=[lon], mode='markers',
-                    marker=dict(size=20, color='red', symbol='star'),
-                    name="Selected Location", hovertemplate="<b>Selected Location</b>"
-                ))
-                # Add highways to the map with colored lines based on category
-                category_colors = {'A': 'green', 'B': 'blue', 'C': 'orange', 'D': 'red'}
+                
+                # Add highways
+                category_colors = {'A': '#28a745', 'B': '#007bff', 'C': '#fd7e14', 'D': '#dc3545'}
+                print(f"Highways found: {len(all_highways)}")
                 for highway in all_highways:
                     if highway['geometry']:
                         lons, lats = zip(*highway['geometry'])
@@ -837,54 +943,132 @@ def main():
                             lon=lons,
                             lat=lats,
                             mode='lines',
-                            line=dict(width=3, color=category_colors.get(highway['category'], 'gray')),
+                            line=dict(width=4, color=category_colors.get(highway['category'], '#6c757d')),
                             name=f"{highway['name']} ({highway['category']})",
-                            hovertemplate=f"Road: {highway['name']}<br>Category: {highway['category_label']}<extra></extra>"
+                            hovertemplate=f"<b>Road: {highway['name']}</b><br>Category: {highway['category_label']}<br>Distance: {highway['distance_m']:.0f}m<extra></extra>",
+                            below=''  # Highways below markers
                         ))
+                
+                # Add subject location marker
+                print(f"Adding subject location marker at lat={lat}, lon={lon}")
+                fig_amenity.add_trace(go.Scattermapbox(
+                    lat=[lat], 
+                    lon=[lon], 
+                    mode='markers',
+                    marker=dict(size=30, color='red', symbol='star', opacity=1.0),
+                    name="Subject Location",
+                    hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
+                ))
+                
+                # Reorder traces
+                traces = list(fig_amenity.data)
+                subject_trace = traces[-1]
+                other_traces = traces[:-1]
+                fig_amenity.data = tuple(other_traces + [subject_trace])
+                print(f"Traces after reordering: {len(fig_amenity.data)}")
+                
                 fig_amenity.update_layout(
                     mapbox_style="open-street-map",
+                    margin=dict(l=20, r=20, t=60, b=80),
+                    hovermode='closest',
+                    showlegend=True,
                     legend=dict(
-                        title="Legend",
-                        yanchor="top",
-                        y=0.99,
-                        xanchor="left",
-                        x=0.01,
-                        bgcolor="rgba(255,255,255,0.8)",
-                        bordercolor="gray",
-                        borderwidth=1
+                        title="Amenities & Highways",
+                        yanchor="top", y=1.0, xanchor="right", x=0.98,
+                        orientation="v", bgcolor="rgba(255,255,255,0.9)",
+                        bordercolor="gray", borderwidth=1, font=dict(size=11),
+                        itemsizing='constant'
                     ),
-                    margin=dict(l=0, r=0, t=0, b=0)
+                    title=dict(text="Nearby Amenities and Highways", x=0.5, xanchor="center", font=dict(size=18, color="black"))
                 )
+                
                 fig_amenity.add_annotation(
-                    text="Note: Amenities are colored by category; highways by type (A: green, B: blue, C: orange, D: red).",
-                    xref="paper", yref="paper", x=0.01, y=0.01,
-                    showarrow=False, font=dict(size=12, color="gray"),
-                    bgcolor="white", bordercolor="gray", borderwidth=1
+                    text="Note: Amenities are colored by category; highways by type (A: green, B: blue, C: orange, D: red). Subject location marked with a red star.",
+                    xref="paper", yref="paper", x=0.01, y=0.01, showarrow=False,
+                    font=dict(size=12, color="black"), bgcolor="rgba(255,255,255,0.9)",
+                    bordercolor="gray", borderwidth=1, borderpad=4
                 )
+                
+                show_legend = st.checkbox("Show Legend", value=True, key="legend_toggle")
+                if not show_legend:
+                    fig_amenity.update_layout(showlegend=False)
+                
                 st.plotly_chart(fig_amenity, use_container_width=True)
             else:
-                st.info("No amenities found within 1km.")
-            
-            # 5. Cluster Map
+                print("No amenities found, using fallback map")
+                fig_amenity = go.Figure()
+                print(f"Adding subject location marker at lat={lat}, lon={lon}")
+                fig_amenity.add_trace(go.Scattermapbox(
+                    lat=[lat], 
+                    lon=[lon], 
+                    mode='markers',
+                    marker=dict(size=30, color='red', symbol='star', opacity=1.0),
+                    name="Subject Location",
+                    hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
+                ))
+                
+                category_colors = {'A': '#28a745', 'B': '#007bff', 'C': '#fd7e14', 'D': '#dc3545'}
+                print(f"Highways in fallback map: {len(all_highways)}")
+                for highway in all_highways:
+                    if highway['geometry']:
+                        lons, lats = zip(*highway['geometry'])
+                        fig_amenity.add_trace(go.Scattermapbox(
+                            lon=lons,
+                            lat=lats,
+                            mode='lines',
+                            line=dict(width=4, color=category_colors.get(highway['category'], '#6c757d')),
+                            name=f"{highway['name']} ({highway['category']})",
+                            hovertemplate=f"<b>Road: {highway['name']}</b><br>Category: {highway['category_label']}<br>Distance: {highway['distance_m']:.0f}m<extra></extra>",
+                            below=''
+                        ))
+                
+                fig_amenity.update_layout(
+                    mapbox_style="open-street-map",
+                    mapbox=dict(center=dict(lat=lat, lon=lon), zoom=12),
+                    margin=dict(l=20, r=20, t=60, b=80),
+                    hovermode='closest',
+                    showlegend=True,
+                    legend=dict(
+                        title="Highways",
+                        yanchor="top", y=1.0, xanchor="right", x=0.98,
+                        orientation="v", bgcolor="rgba(255,255,255,0.9)",
+                        bordercolor="gray", borderwidth=1, font=dict(size=11),
+                        itemsizing='constant'
+                    ),
+                    title=dict(text="Subject Location and Nearby Highways", x=0.5, xanchor="center", font=dict(size=18, color="black"))
+                )
+                
+                fig_amenity.add_annotation(
+                    text="Note: No amenities found within 1km. Subject location marked with a red star; highways by type (A: green, B: blue, C: orange, D: red).",
+                    xref="paper", yref="paper", x=0.01, y=0.01, showarrow=False,
+                    font=dict(size=12, color="black"), bgcolor="rgba(255,255,255,0.9)",
+                    bordercolor="gray", borderwidth=1, borderpad=4
+                )
+                
+                show_legend = st.checkbox("Show Legend", value=True, key="legend_toggle")
+                if not show_legend:
+                    fig_amenity.update_layout(showlegend=False)
+                
+                st.plotly_chart(fig_amenity, use_container_width=True)
+                st.info("No amenities found within 1km, showing subject location and highways.")
+                        
             if dist_km >= 0.5:
                 st.markdown("### Nearest Cluster Projects")
                 st.caption("Map of projects in the nearest cluster, showing their locations and rates.")
                 for col, clus in cluster_info.items():
                     if pd.notna(clus):
-                        fig = plot_cluster_map(project_df, col, clus, f"Nearest {col}: {clus}")
+                        fig = plot_cluster_map(project_df, col, clus, f"Nearest {col}: {clus}", subject_lat=lat, subject_lon=lon)
                         if fig:
                             st.plotly_chart(fig, use_container_width=True)
                         break
             
-            # 6. Regression Analysis
+            st.markdown("### Regression Analysis")
+            st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate.")
             selected_cluster = cluster_info.get('Cluster_LatLong', cluster_info.get('Cluster_LatLongCategory'))
             if pd.notna(selected_cluster):
-                st.markdown("### Regression Analysis")
-                st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate.")
                 category = 'LatLong' if 'Cluster_LatLong' in cluster_info else 'LatLongCategory'
                 show_regression_visuals(regression_data, selected_cluster, category)
             
-            # 7. Valuation Prediction
             st.markdown("### Valuation Prediction")
             st.caption("Estimated property rate per square foot based on regression models using amenity score and road category.")
             
@@ -892,7 +1076,6 @@ def main():
             road = highway_map.get(nearest_biggest_highway['category'], 2)
             predicted_amenity = float(category_df['total_score'].iloc[0]) if not category_df.empty else 0.0
             
-            # LatLong Cluster Prediction using Both (amenity + road)
             latlong_pred = 'N/A'
             latlong_eq = 'N/A'
             sheet_latlong = 'LatLong_Both_vs_Rate'
@@ -903,7 +1086,6 @@ def main():
                     latlong_pred = row['Slope_Amenity'] * predicted_amenity + row['Slope_RoadCat'] * road + row['Intercept']
                     latlong_eq = row['Equation']
             
-            # LatLongCategory Cluster Prediction using Amenity only
             category_pred = 'N/A'
             category_eq = 'N/A'
             sheet_category = 'LatLongCategory_Amenity_vs_Rate'
