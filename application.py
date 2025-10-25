@@ -844,71 +844,10 @@ def main():
             else:
                 st.info("No amenity data available.")
             
-            # Amenities and Highways Map (Enhanced Debugging)
-           # Amenities and Highways Map (Enhanced Debugging and Fix)
+            # Amenities and Highways Map (Fixed)
             st.subheader("Amenities and Highways Map")
             st.caption("Interactive map displaying amenities (colored by category), highways (colored lines by type), and the subject location (red star) within a 1km radius. Hover for details.")
-
-            # Validate and log coordinates
-            try:
-                lat = float(lat)
-                lon = float(lon)
-                print(f"Validated subject location coordinates: lat={lat}, lon={lon}")
-                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                    raise ValueError("Coordinates out of valid range")
-            except (ValueError, TypeError) as e:
-                st.error(f"Invalid coordinates: {e}. Using default: 18.5530, 73.7589")
-                lat, lon = 18.5530, 73.7589
-                print(f"Fallback coordinates: lat={lat}, lon={lon}")
-
-            # Test standalone map with subject location
-            # Debug: Standalone Subject Location Map
-            st.subheader("Debug: Standalone Subject Location Map")
-            st.caption("This map tests the rendering of the subject location marker using the entered coordinates.")
-
-            # Validate and log coordinates
-            try:
-                lat = float(lat)
-                lon = float(lon)
-                print(f"Validated subject location coordinates: lat={lat}, lon={lon}")
-                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                    raise ValueError("Coordinates out of valid range")
-            except (ValueError, TypeError) as e:
-                st.error(f"Invalid coordinates: {e}. Using default: 18.5530, 73.7589")
-                lat, lon = 18.5530, 73.7589
-                print(f"Fallback coordinates: lat={lat}, lon={lon}")
-
-            # Create and log standalone map
-            fig_test = go.Figure()
-            print("Adding test subject location marker")
-            fig_test.add_trace(go.Scattermapbox(
-                lat=[lat], 
-                lon=[lon], 
-                mode='markers',
-                marker=dict(size=30, color='red', symbol='star', opacity=1.0),
-                name="Test Subject Location",
-                hovertemplate="<b>Test Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
-            ))
-            print(f"Trace added: lat={lat}, lon={lon}, type={type(fig_test.data[0]).__name__}")
-
-            # Force map rendering with explicit center and zoom
-            fig_test.update_layout(
-                mapbox_style="open-street-map",
-                mapbox=dict(center=dict(lat=lat, lon=lon), zoom=12, pitch=0, bearing=0),  # Explicit pitch and bearing
-                height=400,
-                margin=dict(l=20, r=20, t=40, b=20),
-                showlegend=True
-            )
-            print("Layout updated. Rendering map...")
-            st.plotly_chart(fig_test, use_container_width=True)
-            print("Standalone test map rendered. Checking data length:", len(fig_test.data))
-
-            # Amenities and Highways Map (Simplified with Debug)
-            st.subheader("Amenities and Highways Map")
-            st.caption("Interactive map displaying amenities (colored by category), highways (colored lines by type), and the subject location (red star) within a 1km radius. Hover for details.")
-
             if not detailed_df.empty:
-                print(f"Amenities found: {len(detailed_df)}")
                 detailed_df['hover_text'] = detailed_df.apply(
                     lambda row: f"{row['name']}<br>{row['category']}<br>{row['distance_m']:.0f}m", axis=1
                 )
@@ -922,20 +861,27 @@ def main():
                     size='f_d', 
                     size_max=12,
                     color_discrete_sequence=px.colors.qualitative.Set2,
-                    zoom=12,
+                    zoom=14, 
                     height=600,
                     center={"lat": lat, "lon": lon},
                     title="Nearby Amenities and Highways"
                 )
                 
                 fig_amenity.update_traces(
-                    marker=dict(opacity=0.85, sizemin=6),
+                    marker=dict(
+                        opacity=0.85,
+                        sizemin=6
+                    ),
                     hovertemplate="%{hovertext}<extra></extra>"
                 )
                 
-                # Add highways
-                category_colors = {'A': '#28a745', 'B': '#007bff', 'C': '#fd7e14', 'D': '#dc3545'}
-                print(f"Highways found: {len(all_highways)}")
+                # Add highways to the map with colored lines based on category
+                category_colors = {
+                    'A': '#28a745',  # Green
+                    'B': '#007bff',  # Blue
+                    'C': '#fd7e14',  # Orange
+                    'D': '#dc3545'   # Red
+                }
                 for highway in all_highways:
                     if highway['geometry']:
                         lons, lats = zip(*highway['geometry'])
@@ -943,29 +889,35 @@ def main():
                             lon=lons,
                             lat=lats,
                             mode='lines',
-                            line=dict(width=4, color=category_colors.get(highway['category'], '#6c757d')),
+                            line=dict(
+                                width=4,
+                                color=category_colors.get(highway['category'], '#6c757d')
+                            ),
                             name=f"{highway['name']} ({highway['category']})",
                             hovertemplate=f"<b>Road: {highway['name']}</b><br>Category: {highway['category_label']}<br>Distance: {highway['distance_m']:.0f}m<extra></extra>",
-                            below=''  # Highways below markers
+                            below=''  # Ensure highways are below markers
                         ))
                 
                 # Add subject location marker
-                print(f"Adding subject location marker at lat={lat}, lon={lon}")
                 fig_amenity.add_trace(go.Scattermapbox(
                     lat=[lat], 
                     lon=[lon], 
                     mode='markers',
-                    marker=dict(size=30, color='red', symbol='star', opacity=1.0),
+                    marker=dict(
+                        size=30,  # Increased size for visibility
+                        color='red',
+                        symbol='star'
+                    ),
                     name="Subject Location",
-                    hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
+                    hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>",
+                    below=''  # Ensure marker is on top
                 ))
                 
-                # Reorder traces
+                # Reorder traces to ensure subject location is the last trace (rendered on top)
                 traces = list(fig_amenity.data)
-                subject_trace = traces[-1]
+                subject_trace = traces[-1]  # Subject location is the last added
                 other_traces = traces[:-1]
                 fig_amenity.data = tuple(other_traces + [subject_trace])
-                print(f"Traces after reordering: {len(fig_amenity.data)}")
                 
                 fig_amenity.update_layout(
                     mapbox_style="open-street-map",
@@ -974,19 +926,37 @@ def main():
                     showlegend=True,
                     legend=dict(
                         title="Amenities & Highways",
-                        yanchor="top", y=1.0, xanchor="right", x=0.98,
-                        orientation="v", bgcolor="rgba(255,255,255,0.9)",
-                        bordercolor="gray", borderwidth=1, font=dict(size=11),
+                        yanchor="top",
+                        y=1.0,
+                        xanchor="right",
+                        x=0.98,
+                        orientation="v",
+                        bgcolor="rgba(255,255,255,0.9)",
+                        bordercolor="gray",
+                        borderwidth=1,
+                        font=dict(size=11),
                         itemsizing='constant'
                     ),
-                    title=dict(text="Nearby Amenities and Highways", x=0.5, xanchor="center", font=dict(size=18, color="black"))
+                    title=dict(
+                        text="Nearby Amenities and Highways",
+                        x=0.5,
+                        xanchor="center",
+                        font=dict(size=18, color="black")
+                    )
                 )
                 
                 fig_amenity.add_annotation(
                     text="Note: Amenities are colored by category; highways by type (A: green, B: blue, C: orange, D: red). Subject location marked with a red star.",
-                    xref="paper", yref="paper", x=0.01, y=0.01, showarrow=False,
-                    font=dict(size=12, color="black"), bgcolor="rgba(255,255,255,0.9)",
-                    bordercolor="gray", borderwidth=1, borderpad=4
+                    xref="paper", 
+                    yref="paper", 
+                    x=0.01, 
+                    y=0.01,
+                    showarrow=False, 
+                    font=dict(size=12, color="black"),
+                    bgcolor="rgba(255,255,255,0.9)", 
+                    bordercolor="gray", 
+                    borderwidth=1,
+                    borderpad=4
                 )
                 
                 show_legend = st.checkbox("Show Legend", value=True, key="legend_toggle")
@@ -995,20 +965,29 @@ def main():
                 
                 st.plotly_chart(fig_amenity, use_container_width=True)
             else:
-                print("No amenities found, using fallback map")
+                # Display map with only subject location if no amenities
                 fig_amenity = go.Figure()
-                print(f"Adding subject location marker at lat={lat}, lon={lon}")
                 fig_amenity.add_trace(go.Scattermapbox(
                     lat=[lat], 
                     lon=[lon], 
                     mode='markers',
-                    marker=dict(size=30, color='red', symbol='star', opacity=1.0),
+                    marker=dict(
+                        size=30,
+                        color='red',
+                        symbol='star',
+                        opacity=1.0
+                    ),
                     name="Subject Location",
                     hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
                 ))
                 
-                category_colors = {'A': '#28a745', 'B': '#007bff', 'C': '#fd7e14', 'D': '#dc3545'}
-                print(f"Highways in fallback map: {len(all_highways)}")
+                # Add highways even if no amenities
+                category_colors = {
+                    'A': '#28a745',
+                    'B': '#007bff',
+                    'C': '#fd7e14',
+                    'D': '#dc3545'
+                }
                 for highway in all_highways:
                     if highway['geometry']:
                         lons, lats = zip(*highway['geometry'])
@@ -1016,7 +995,10 @@ def main():
                             lon=lons,
                             lat=lats,
                             mode='lines',
-                            line=dict(width=4, color=category_colors.get(highway['category'], '#6c757d')),
+                            line=dict(
+                                width=4,
+                                color=category_colors.get(highway['category'], '#6c757d')
+                            ),
                             name=f"{highway['name']} ({highway['category']})",
                             hovertemplate=f"<b>Road: {highway['name']}</b><br>Category: {highway['category_label']}<br>Distance: {highway['distance_m']:.0f}m<extra></extra>",
                             below=''
@@ -1024,25 +1006,46 @@ def main():
                 
                 fig_amenity.update_layout(
                     mapbox_style="open-street-map",
-                    mapbox=dict(center=dict(lat=lat, lon=lon), zoom=12),
+                    mapbox=dict(
+                        center=dict(lat=lat, lon=lon),
+                        zoom=14
+                    ),
                     margin=dict(l=20, r=20, t=60, b=80),
                     hovermode='closest',
                     showlegend=True,
                     legend=dict(
                         title="Highways",
-                        yanchor="top", y=1.0, xanchor="right", x=0.98,
-                        orientation="v", bgcolor="rgba(255,255,255,0.9)",
-                        bordercolor="gray", borderwidth=1, font=dict(size=11),
+                        yanchor="top",
+                        y=1.0,
+                        xanchor="right",
+                        x=0.98,
+                        orientation="v",
+                        bgcolor="rgba(255,255,255,0.9)",
+                        bordercolor="gray",
+                        borderwidth=1,
+                        font=dict(size=11),
                         itemsizing='constant'
                     ),
-                    title=dict(text="Subject Location and Nearby Highways", x=0.5, xanchor="center", font=dict(size=18, color="black"))
+                    title=dict(
+                        text="Subject Location and Nearby Highways",
+                        x=0.5,
+                        xanchor="center",
+                        font=dict(size=18, color="black")
+                    )
                 )
                 
                 fig_amenity.add_annotation(
                     text="Note: No amenities found within 1km. Subject location marked with a red star; highways by type (A: green, B: blue, C: orange, D: red).",
-                    xref="paper", yref="paper", x=0.01, y=0.01, showarrow=False,
-                    font=dict(size=12, color="black"), bgcolor="rgba(255,255,255,0.9)",
-                    bordercolor="gray", borderwidth=1, borderpad=4
+                    xref="paper", 
+                    yref="paper", 
+                    x=0.01, 
+                    y=0.01,
+                    showarrow=False, 
+                    font=dict(size=12, color="black"),
+                    bgcolor="rgba(255,255,255,0.9)", 
+                    bordercolor="gray", 
+                    borderwidth=1,
+                    borderpad=4
                 )
                 
                 show_legend = st.checkbox("Show Legend", value=True, key="legend_toggle")
@@ -1051,7 +1054,7 @@ def main():
                 
                 st.plotly_chart(fig_amenity, use_container_width=True)
                 st.info("No amenities found within 1km, showing subject location and highways.")
-                        
+            
             if dist_km >= 0.5:
                 st.markdown("### Nearest Cluster Projects")
                 st.caption("Map of projects in the nearest cluster, showing their locations and rates.")
