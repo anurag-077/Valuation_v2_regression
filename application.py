@@ -585,7 +585,7 @@ def show_regression_visuals(regression_data, cluster_num, category):
                 row['Equation'], slope1, row['Intercept'],
                 x_label1, "Rate (₹ per sqft)", row['Num_Projects'], x_range1, title
             )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=f"plotly_{sheet}_{cluster_num}")
     
     eqs = []
     for sheet, row in cluster_data.items():
@@ -594,7 +594,9 @@ def show_regression_visuals(regression_data, cluster_num, category):
             'Equation': row['Equation'],
             'Sample Size': row['Num_Projects']
         })
-    st.dataframe(pd.DataFrame(eqs).style.set_table_styles([{'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}]), use_container_width=True)
+    st.dataframe(pd.DataFrame(eqs).style.set_table_styles([{'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}]), 
+                 use_container_width=True, 
+                 key=f"df_regression_{cluster_num}")
 
 def create_regression_plot(equation, slope, intercept, x_label, y_label, n, x_range, title, slope2=None, x_label2=None, x_range2=None):
     if slope2 is not None:
@@ -829,7 +831,7 @@ def main():
                 showarrow=False, font=dict(size=12, color="gray"),
                 bgcolor="white", bordercolor="gray", borderwidth=1
             )
-            st.plotly_chart(fig_map, use_container_width=True)
+            st.plotly_chart(fig_map, use_container_width=True, key="cluster_map_all")
             if num_villages > 1:
                 st.info(f"These clusters span {num_villages} villages, including {selected_village}.")
         else:
@@ -843,7 +845,7 @@ def main():
                 title += f" (Spans {num_villages} Villages)"
             fig_map = plot_cluster_map(full_filtered, cluster_type, selected_cluster, title)
             if fig_map:
-                st.plotly_chart(fig_map, use_container_width=True)
+                st.plotly_chart(fig_map, use_container_width=True, key=f"cluster_map_{selected_cluster}")
             if num_villages > 1:
                 st.info(f"This cluster spans {num_villages} villages, including {selected_village}.")
             else:
@@ -959,7 +961,7 @@ def main():
                         name="Subject Location",
                         hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
                     ))
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"cluster_map_{cluster_type}_{selected_cluster}")
             else:
                 st.warning(f"No valid {cluster_type} cluster found for this location.")
             
@@ -981,7 +983,7 @@ def main():
                     {'selector': 'thead th', 'props': [('background-color', '#667eea'), ('color', 'white'), ('font-weight', 'bold')]},
                     {'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}
                 ]).format({'Distance (m)': '{:.1f}'})
-                st.dataframe(styled_df, width='stretch', hide_index=True)
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
             else:
                 st.info("No highways found within 200m.")
             
@@ -1008,7 +1010,7 @@ def main():
                     {'selector': 'thead th', 'props': [('background-color', '#667eea'), ('color', 'white'), ('font-weight', 'bold')]},
                     {'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}
                 ]).format(precision=3)
-                st.dataframe(styled_category, width='stretch', hide_index=True)
+                st.dataframe(styled_category, use_container_width=True, hide_index=True)
             else:
                 st.info("No amenity data available.")
             
@@ -1033,7 +1035,7 @@ def main():
                         'Distance (m)': '{:.1f}',
                         'Influence Factor (f_d)': '{:.3f}'
                     })
-                    st.dataframe(styled_amenity_df, width='stretch', hide_index=True)
+                    st.dataframe(styled_amenity_df, use_container_width=True, hide_index=True)
                 else:
                     st.info("No amenities found within 1km.")
             
@@ -1153,7 +1155,7 @@ def main():
                 if not show_legend:
                     fig_amenity.update_layout(showlegend=False)
                 
-                st.plotly_chart(fig_amenity, use_container_width=True)
+                st.plotly_chart(fig_amenity, use_container_width=True, key="amenity_highway_map")
             else:
                 fig_amenity = go.Figure()
                 fig_amenity.add_trace(go.Scattermapbox(
@@ -1237,11 +1239,11 @@ def main():
                     borderpad=4
                 )
                 
-                show_legend = st.checkbox("Show Legend", value=True, key="legend_toggle")
+                show_legend = st.checkbox("Show Legend", value=True, key="legend_toggle_no_amenities")
                 if not show_legend:
                     fig_amenity.update_layout(showlegend=False)
                 
-                st.plotly_chart(fig_amenity, use_container_width=True)
+                st.plotly_chart(fig_amenity, use_container_width=True, key="highway_map_no_amenities")
                 st.info("No amenities found within 1km, showing subject location and highways.")
             
             st.markdown("### Regression Analysis")
