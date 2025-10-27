@@ -124,6 +124,16 @@ def load_project_data():
         st.error(f"Missing required columns in project data: {', '.join(missing_columns)}")
         st.stop()
     
+    # Clean data: Remove rows with NaN in critical columns and ensure numeric coordinates
+    df = df.dropna(subset=['project_lat', 'project_lng', 'Village', 'Mid_Rate', 'Project_Name'])
+    df['project_lat'] = pd.to_numeric(df['project_lat'], errors='coerce')
+    df['project_lng'] = pd.to_numeric(df['project_lng'], errors='coerce')
+    df = df.dropna(subset=['project_lat', 'project_lng'])
+    
+    if df.empty:
+        st.error("No valid project data after cleaning. Please check the data file.")
+        st.stop()
+    
     print(f"Loaded Projects: {len(df)} rows")
     return df
 
@@ -166,6 +176,7 @@ def load_amenities(amenity_dir: str = "amenities"):
     for file in found_files:
         type_name = file[:-5].lower()
         if type_name not in AMENITY_TYPES:
+            logging.warning(f"Skipping {file}: type_name {type_name} not in AMENITY_TYPES")
             continue
         
         group_name = AMENITY_TYPES[type_name]
@@ -174,6 +185,7 @@ def load_amenities(amenity_dir: str = "amenities"):
         try:
             df = pd.read_excel(file_path)
             if 'lat' not in df.columns or 'lng' not in df.columns:
+                logging.warning(f"Skipping {file}: missing 'lat' or 'lng' columns")
                 continue
                 
             df = df.dropna(subset=['lat', 'lng'])
@@ -182,6 +194,7 @@ def load_amenities(amenity_dir: str = "amenities"):
             df = df.dropna(subset=['lat', 'lng'])
             
             if df.empty:
+                logging.warning(f"Skipping {file}: no valid data after cleaning")
                 continue
             
             if 'name' in df.columns:
@@ -192,23 +205,27 @@ def load_amenities(amenity_dir: str = "amenities"):
             df['category'] = group_name
             df['type_name'] = type_name
             data.append(df[['lat', 'lng', 'category', 'type_name', 'name']])
-            print(f"Loaded {len(df)} {type_name}")
+            logging.info(f"Loaded {len(df)} {type_name} amenities from {file}")
             
         except Exception as e:
-            print(f"Error loading {file}: {e}")
+            logging.error(f"Error loading {file}: {e}")
             continue
     
-    if data:
-        result = pd.concat(data, ignore_index=True)
-        print(f"Total Amenities: {len(result)}")
-        return result
-    return create_sample_data()
+    if not data:
+        st.warning("No valid amenity data loaded. Using sample data.")
+        return create_sample_data()
+    
+    result = pd.concat(data, ignore_index=True)
+    logging.info(f"Total Amenities Loaded: {len(result)}")
+    return result
 
 def create_sample_data():
     """Generate sample amenity data for testing."""
     sample_data = [
-        {'lat': 18.5530, 'lng': 73.7589, 'name': 'Metro-1', 'type_name': 'metro_station', 'category': 'Metro'},
-        {'lat': 18.5536, 'lng': 73.7595, 'name': 'Metro-2', 'type_name': 'metro_station', 'category': 'Metro'},
+        {'lat': 18.5530, 'lng': 73.7589, 'name': 'Metro Station 1', 'type_name': 'metro_station', 'category': 'Metro'},
+        {'lat': 18.5540, 'lng': 73.7590, 'name': 'Metro Station 2', 'type_name': 'metro_station', 'category': 'Metro'},
+        {'lat': 18.5525, 'lng': 73.7595, 'name': 'Bus Stop 1', 'type_name': 'bus_stop', 'category': 'Bus'},
+        {'lat': 18.5535, 'lng': 73.7585, 'name': 'Mall 1', 'type_name': 'mall', 'category': 'Mall'},
     ]
     return pd.DataFrame(sample_data)
 
@@ -228,26 +245,47 @@ def haversine_vectorized(lat1: float, lon1: float, lats2: np.ndarray, lons2: np.
 
 def calculate_amenity_scores(lat: float, lon: float, all_amenities: pd.DataFrame, weights: dict) -> pd.DataFrame:
     if all_amenities.empty:
+        logging.warning("all_amenities is empty")
         return pd.DataFrame()
     
     lats = all_amenities['lat'].values
     lons = all_amenities['lng'].values
+    if len(lats) == 0 or len(lons) == 0:
+        logging.warning("No valid coordinates in all_amenities")
+        return pd.DataFrame()
+    
     dists = haversine_vectorized(lat, lon, lats, lons)
+    logging.info(f"Calculated distances for {len(dists)} amenities, max distance: {dists.max():.1f}m")
     
     mask = dists <= POI_SEARCH_RADIUS_M
     if not np.any(mask):
+        logging.warning(f"No amenities within {POI_SEARCH_RADIUS_M}m of lat={lat}, lon={lon}")
         return pd.DataFrame()
     
     filtered_df = all_amenities[mask].copy()
     filtered_df['distance_m'] = dists[mask]
     filtered_df['f_d'] = 1 / (1 + filtered_df['distance_m'] / 200)
+    logging.info(f"Filtered {len(filtered_df)} amenities within {POI_SEARCH_RADIUS_M}m")
+    
+    # Validate and clean category column
+    if 'category' not in filtered_df.columns or filtered_df['category'].isna().all():
+        logging.warning("No valid 'category' column in filtered_df")
+        return pd.DataFrame()
+    filtered_df = filtered_df.dropna(subset=['category'])
+    if filtered_df.empty:
+        logging.warning("No amenities with valid categories after filtering")
+        return pd.DataFrame()
+    
+    # Calculate category counts
+    category_counts = filtered_df.groupby('category').size()
+    logging.info(f"Category counts: {category_counts.to_dict()}")
     
     category_scores = filtered_df.groupby('category')['f_d'].sum().reset_index()
     category_scores.columns = ['category', 'S_c']
     category_scores['s_c'] = 1 - np.exp(-0.8 * category_scores['S_c'])
     category_scores['weight'] = category_scores['category'].map(weights).fillna(0)
     category_scores['Weight × s_c'] = category_scores['weight'] * category_scores['s_c']
-    category_scores['count'] = filtered_df.groupby('category').size().reindex(category_scores['category']).fillna(0)
+    category_scores['count'] = category_scores['category'].map(category_counts).fillna(0).astype(int)
     
     total_score = category_scores['Weight × s_c'].sum()
     category_scores['total_score'] = total_score
@@ -259,6 +297,7 @@ def calculate_amenity_scores(lat: float, lon: float, all_amenities: pd.DataFrame
                 'Weight × s_c': [0], 'count': [0], 'total_score': [total_score]
             })], ignore_index=True)
     
+    logging.info(f"Category scores: {category_scores.to_dict()}")
     return category_scores.sort_values('Weight × s_c', ascending=False)
 
 def get_detailed_amenities(lat: float, lon: float, all_amenities: pd.DataFrame) -> pd.DataFrame:
@@ -454,9 +493,9 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map", subject_
             lat=[subject_lat],
             lon=[subject_lon],
             mode='markers',
-            marker=dict(size=20, color='yellow', symbol='star'),
+            marker=dict(size=20, color='red', symbol='star', opacity=1.0),
             name="Subject Location",
-            hovertemplate="<b>Subject Location</b>"
+            hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
         ))
     
     fig.update_layout(
@@ -476,7 +515,7 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map", subject_
         )
     )
     fig.add_annotation(
-        text="Note: Points represent projects colored by their mid rate.",
+        text="Note: Points represent projects colored by their mid rate. Cluster boundaries shown where applicable.",
         xref="paper", yref="paper", x=0.01, y=0.01,
         showarrow=False, font=dict(size=12, color="gray"),
         bgcolor="white", bordercolor="gray", borderwidth=1
@@ -487,9 +526,7 @@ def show_regression_visuals(regression_data, cluster_num, category):
     available_sheets = []
     if category == 'LatLong':
         available_sheets = ['LatLong_Amenity_vs_Rate', 'LatLong_RoadCat_vs_Rate', 'LatLong_Both_vs_Rate']
-    elif category == 'LatLongRate':
-        available_sheets = ['LatLongRate_Amenity_vs_Rate', 'LatLongRate_RoadCat_vs_Rate', 'LatLongRate_Both_vs_Rate']
-    else:
+    elif category == 'LatLongCategory':
         available_sheets = ['LatLongCategory_Amenity_vs_Rate']
     
     cluster_data = {}
@@ -503,29 +540,52 @@ def show_regression_visuals(regression_data, cluster_num, category):
         st.info("No regression data available for this cluster.")
         return
     
-    cols = st.columns(min(3, len(cluster_data)))
-    for idx, (sheet, row) in enumerate(cluster_data.items()):
-        with cols[idx]:
-            if 'Both' in sheet:
-                title = "Combined Amenity & Road vs Rate"
-            elif 'Amenity' in sheet:
-                title = "Amenity Score vs Rate"
-                x_range, x_label = 10, "Amenity Score (1-10)"
-                slope = row['Slope_Amenity']
-            elif 'RoadCat' in sheet:
-                title = "Road Category vs Rate"
-                x_range, x_label = 4, "Road Category (1-4)"
-                slope = row['Slope_RoadCat']
-            else:
-                title = "Amenity Score vs Rate"
-                x_range, x_label = 10, "Amenity Score (1-10)"
-                slope = row['Slope_Amenity']
-            
+    for sheet, row in cluster_data.items():
+        st.subheader(sheet.replace('_vs_Rate', ''))
+        slope2 = None
+        x_label2 = None
+        x_range2 = None
+        if 'Both' in sheet:
+            title = "Combined Amenity & Road vs Rate"
+            slope1 = row['Slope_Amenity']
+            slope2 = row['Slope_RoadCat']
+            x_label1 = "Amenity Score (0-1)"
+            x_label2 = "Road Category (1-4)"
+            x_range1 = 1
+            x_range2 = 4
             fig = create_regression_plot(
-                row['Equation'], slope, row['Intercept'],
-                x_label, "Rate (₹ per sqft)", row['Num_Projects'], x_range, title
+                row['Equation'], slope1, row['Intercept'],
+                x_label1, "Rate (₹ per sqft)", row['Num_Projects'], x_range1, title,
+                slope2=slope2, x_label2=x_label2, x_range2=x_range2
             )
-            st.plotly_chart(fig, use_container_width=True)
+        elif 'Amenity' in sheet:
+            title = "Amenity Score vs Rate"
+            x_range1 = 1
+            x_label1 = "Amenity Score (0-1)"
+            slope1 = row['Slope_Amenity']
+            fig = create_regression_plot(
+                row['Equation'], slope1, row['Intercept'],
+                x_label1, "Rate (₹ per sqft)", row['Num_Projects'], x_range1, title
+            )
+        elif 'RoadCat' in sheet:
+            title = "Road Category vs Rate"
+            x_range1 = 4
+            x_label1 = "Road Category (1-4)"
+            slope1 = row['Slope_RoadCat']
+            fig = create_regression_plot(
+                row['Equation'], slope1, row['Intercept'],
+                x_label1, "Rate (₹ per sqft)", row['Num_Projects'], x_range1, title
+            )
+        else:
+            title = "Amenity Score vs Rate"
+            x_range1 = 1
+            x_label1 = "Amenity Score (0-1)"
+            slope1 = row['Slope_Amenity']
+            fig = create_regression_plot(
+                row['Equation'], slope1, row['Intercept'],
+                x_label1, "Rate (₹ per sqft)", row['Num_Projects'], x_range1, title
+            )
+        st.plotly_chart(fig, use_container_width=True)
     
     eqs = []
     for sheet, row in cluster_data.items():
@@ -536,37 +596,77 @@ def show_regression_visuals(regression_data, cluster_num, category):
         })
     st.dataframe(pd.DataFrame(eqs).style.set_table_styles([{'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}]), use_container_width=True)
 
-def create_regression_plot(equation, slope, intercept, x_label, y_label, n, x_range, title):
-    x = np.linspace(1, x_range, 100)
-    y = slope * x + intercept
-    
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y, mode='lines', 
-                           line=dict(color='#1f77b4', width=4, dash='solid')))
-    
-    fig.add_annotation(
-        x=0.98, y=0.98, xref="paper", yref="paper",
-        text=f"<b>{equation}</b><br>Sample Size: {n}",
-        showarrow=False, font=dict(size=12), 
-        bgcolor="white", bordercolor="#1f77b4", borderwidth=1
-    )
-    
-    fig.update_layout(
-        title=dict(text=title, font=dict(size=16)),
-        xaxis_title=x_label,
-        yaxis_title=y_label,
-        height=280,
-        showlegend=False,
-        plot_bgcolor='white',
-        xaxis=dict(showgrid=True, gridcolor='lightgray'),
-        yaxis=dict(showgrid=True, gridcolor='lightgray')
-    )
-    fig.add_annotation(
-        text="Note: Line represents the regression model fit.",
-        xref="paper", yref="paper", x=0.01, y=0.01,
-        showarrow=False, font=dict(size=12, color="gray"),
-        bgcolor="white", bordercolor="gray", borderwidth=1
-    )
+def create_regression_plot(equation, slope, intercept, x_label, y_label, n, x_range, title, slope2=None, x_label2=None, x_range2=None):
+    if slope2 is not None:
+        # 3D plot for multiple regression
+        x = np.linspace(0, x_range, 20)
+        y = np.linspace(1, x_range2, 20)
+        x, y = np.meshgrid(x, y)
+        z = slope * x + slope2 * y + intercept
+        
+        fig = go.Figure(data=[go.Surface(z=z, x=x, y=y, colorscale='viridis')])
+        
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16)),
+            scene=dict(
+                xaxis_title=x_label,
+                yaxis_title=x_label2,
+                zaxis_title=y_label,
+                xaxis=dict(showgrid=True, gridcolor='lightgray'),
+                yaxis=dict(showgrid=True, gridcolor='lightgray'),
+                zaxis=dict(showgrid=True, gridcolor='lightgray')
+            ),
+            height=400,
+            margin=dict(l=0, r=0, b=0, t=30),
+            showlegend=False,
+            plot_bgcolor='white'
+        )
+        
+        fig.add_annotation(
+            x=0.05, y=0.05, xref="paper", yref="paper",
+            text=f"<b>{equation}</b><br>Sample Size: {n}",
+            showarrow=False, font=dict(size=12), 
+            bgcolor="white", bordercolor="#1f77b4", borderwidth=1
+        )
+        
+        fig.add_annotation(
+            text="Note: Surface represents the regression model fit.",
+            xref="paper", yref="paper", x=0.01, y=0.01,
+            showarrow=False, font=dict(size=12, color="gray"),
+            bgcolor="white", bordercolor="gray", borderwidth=1
+        )
+    else:
+        # 2D plot for single variable
+        x = np.linspace(1, x_range, 100) if 'Road Category' in x_label else np.linspace(0, x_range, 100)
+        y = slope * x + intercept
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=x, y=y, mode='lines', 
+                               line=dict(color='#1f77b4', width=4, dash='solid')))
+        
+        fig.add_annotation(
+            x=0.98, y=0.98, xref="paper", yref="paper",
+            text=f"<b>{equation}</b><br>Sample Size: {n}",
+            showarrow=False, font=dict(size=12), 
+            bgcolor="white", bordercolor="#1f77b4", borderwidth=1
+        )
+        
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16)),
+            xaxis_title=x_label,
+            yaxis_title=y_label,
+            height=400,
+            showlegend=False,
+            plot_bgcolor='white',
+            xaxis=dict(showgrid=True, gridcolor='lightgray'),
+            yaxis=dict(showgrid=True, gridcolor='lightgray')
+        )
+        fig.add_annotation(
+            text="Note: Line represents the regression model fit.",
+            xref="paper", yref="paper", x=0.01, y=0.01,
+            showarrow=False, font=dict(size=12, color="gray"),
+            bgcolor="white", bordercolor="gray", borderwidth=1
+        )
     return fig
 
 def main():
@@ -625,25 +725,43 @@ def main():
     
     with tab1:
         st.header("Cluster Explorer")
-        st.caption("Explore project clusters on a map based on geographic or categorical groupings. Selecting a village shows all projects in clusters containing at least one project from that village.")
+        st.caption("Explore project clusters on a map based on geographic or categorical groupings. Selecting a village shows all projects in clusters containing at least one project from that village. Clusters are predefined based on project locations and attributes.")
+        
+        if project_df.empty:
+            st.error("No project data available. Please ensure 'All_Project_data_WITH_Amenity_Scores.xlsx' contains valid data.")
+            st.stop()
+        
         col1, col2 = st.columns(2)
         
         with col1:
             cluster_type = st.selectbox("Cluster Type", 
                                       ['Cluster_LatLong', 'Cluster_LatLongCategory'],
                                       help="Select the type of clustering: LatLong (geographic) or LatLongCategory (geographic and categorical).")
+        
         with col2:
             villages = sorted(project_df['Village'].dropna().unique())
+            if not villages:
+                st.error("No valid villages found in the data. Please check the 'Village' column in the project data.")
+                st.stop()
             selected_village = st.selectbox("Select Village", villages,
                                           help="Choose a village to filter clusters. Shows all projects in clusters that include this village.")
             filtered_df = project_df[project_df['Village'] == selected_village]
+            if filtered_df.empty:
+                st.warning(f"No projects found for village: {selected_village}")
+                st.stop()
             clusters = sorted(filtered_df[cluster_type].dropna().unique())
+            if not clusters:
+                st.warning(f"No valid clusters found for {cluster_type} in village: {selected_village}")
+                st.stop()
             clusters = ['All'] + clusters
             selected_cluster = st.selectbox("Cluster Number", clusters,
                                           help="Choose a specific cluster number to visualize all projects in that cluster, or select 'All' to see all relevant clusters.")
         
         if selected_cluster == 'All':
             relevant_clusters = project_df[project_df[cluster_type].isin(clusters[1:])]
+            if relevant_clusters.empty:
+                st.warning(f"No projects found in clusters associated with {selected_village}. Try another village or cluster type.")
+                st.stop()
             relevant_clusters['hover_text'] = relevant_clusters.apply(
                 lambda row: f"<b>{row['Project_Name']}</b><br>₹{row['Mid_Rate']:.1f} per sqft<br>{row['Village']}", axis=1
             )
@@ -716,6 +834,9 @@ def main():
                 st.info(f"These clusters span {num_villages} villages, including {selected_village}.")
         else:
             full_filtered = project_df[project_df[cluster_type] == selected_cluster]
+            if full_filtered.empty:
+                st.warning(f"No projects found in {cluster_type} = {selected_cluster}. Try another cluster.")
+                st.stop()
             num_villages = len(full_filtered['Village'].unique())
             title = f"Cluster Map - Cluster {selected_cluster}"
             if num_villages > 1:
@@ -732,7 +853,7 @@ def main():
                        'Cluster_LatLongCategory': 'LatLongCategory'}
         category = category_map.get(cluster_type, 'LatLong')
         st.subheader("Regression Analysis")
-        st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate.")
+        st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate for the selected cluster.")
         if selected_cluster != 'All':
             show_regression_visuals(regression_data, selected_cluster, category)
         else:
@@ -740,11 +861,11 @@ def main():
     
     with tab2:
         st.header("Location Analyzer")
-        st.caption("Analyze a specific location to evaluate nearby highways, amenities, and predicted property rates.")
+        st.caption("Analyze a specific location to evaluate nearby highways, amenities, and predicted property rates. Select a cluster type to view the corresponding cluster map with the subject location highlighted.")
         
         with st.sidebar:
             st.markdown("### Amenity Weights")
-            st.caption("Adjust the weights for different amenity categories to influence the amenity score calculation.")
+            st.caption("Adjust the weights for different amenity categories to influence the amenity score calculation. Standard weights are assigned as follows: Metro (0.25), Bus (0.15), Mall (0.225), School (0.225), Hospital (0.075), Garden (0.075). Customize them to your preference.")
             categories = list(DEFAULT_WEIGHTS.keys())
             custom_weights = {}
             total_weight = 0
@@ -764,8 +885,9 @@ def main():
         with col1:
             st.markdown("**Coordinates**")
         with col2:
-            coord_input = st.text_input("", value="18.5530, 73.7589",
-                                      help="Enter coordinates in the format: latitude, longitude (e.g., 18.5530, 73.7589)")
+            coord_input = st.text_input("", value=st.session_state.get('coord_input', "18.5530, 73.7589"),
+                                       key="coord_input",
+                                       help="Enter coordinates in the format: latitude, longitude (e.g., 18.5530, 73.7589)")
         
         try:
             lat, lon = map(float, coord_input.split(','))
@@ -773,8 +895,23 @@ def main():
             st.error("Invalid format! Use: latitude,longitude")
             st.stop()
         
+        # Initialize session state
+        if 'analysis_done' not in st.session_state:
+            st.session_state['analysis_done'] = False
+        if 'selected_cluster_type' not in st.session_state:
+            st.session_state['selected_cluster_type'] = 'Cluster_LatLong'
+        
         if st.button("Analyze Location", type="primary", use_container_width=True):
+            st.session_state['analysis_done'] = True
+            st.session_state['lat'] = lat
+            st.session_state['lon'] = lon
             current_weights = {cat: st.session_state[f"wt_{cat}"] for cat in categories}
+            st.session_state['current_weights'] = current_weights
+        
+        if st.session_state['analysis_done']:
+            lat = st.session_state['lat']
+            lon = st.session_state['lon']
+            current_weights = st.session_state['current_weights']
             
             cluster_info, dist_km, nearest_project = find_nearest_cluster(project_df, lat, lon)
             
@@ -788,17 +925,46 @@ def main():
                 else:
                     st.warning(f"Nearest Cluster ({dist_km:.1f} km)")
             with col2:
-                st.metric("LatLong Cluster", cluster_info.get('Cluster_LatLong', 'N/A'))
+                latlong_cluster = cluster_info.get('Cluster_LatLong', 'N/A')
+                if st.button("Show LatLong Cluster Map", key="latlong_cluster_button"):
+                    st.session_state['selected_cluster_type'] = 'Cluster_LatLong'
+                    st.rerun()
+                st.metric("LatLong Cluster", latlong_cluster)
             with col3:
-                st.metric("Category Cluster", cluster_info.get('Cluster_LatLongCategory', 'N/A'))
+                category_cluster = cluster_info.get('Cluster_LatLongCategory', 'N/A')
+                if st.button("Show Category Cluster Map", key="category_cluster_button"):
+                    st.session_state['selected_cluster_type'] = 'Cluster_LatLongCategory'
+                    st.rerun()
+                st.metric("Category Cluster", category_cluster)
             with col4:
                 if nearest_biggest_highway['category']:
                     st.metric("Nearest Major Highway", f"{nearest_biggest_highway['category_label']} ({nearest_biggest_highway['distance_m']:.0f}m)")
                 else:
                     st.metric("Nearest Major Highway", "None found")
             
+            st.markdown("### Nearest Cluster Projects")
+            st.caption("Map of projects in the selected cluster, with the subject location highlighted as a red star. Use buttons above to switch cluster type.")
+            cluster_type = st.session_state['selected_cluster_type']
+            selected_cluster = cluster_info.get(cluster_type)
+            if pd.notna(selected_cluster):
+                fig = plot_cluster_map(project_df, cluster_type, selected_cluster, title=f"Nearest {cluster_type}: {selected_cluster}", subject_lat=lat, subject_lon=lon)
+                if fig:
+                    # Ensure subject location is a red star
+                    fig.data = [trace for trace in fig.data if trace.name != "Subject Location"]
+                    fig.add_trace(go.Scattermapbox(
+                        lat=[lat],
+                        lon=[lon],
+                        mode='markers',
+                        marker=dict(size=20, color='red', symbol='star', opacity=1.0),
+                        name="Subject Location",
+                        hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
+                    ))
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning(f"No valid {cluster_type} cluster found for this location.")
+            
             st.markdown("### Nearby Highways (200m Radius)")
-            st.caption("List of highways within 200 meters, sourced from OpenStreetMap, sorted by proximity.")
+            st.caption("List of highways within a 200-meter radius of the subject location, sourced from OpenStreetMap, sorted by proximity. The widest highway is considered for valuation impact.")
             if all_highways:
                 highway_df = pd.DataFrame(all_highways)
                 highway_df = highway_df[['name', 'highway', 'category', 'category_label', 'distance_m']].rename(
@@ -815,13 +981,13 @@ def main():
                     {'selector': 'thead th', 'props': [('background-color', '#667eea'), ('color', 'white'), ('font-weight', 'bold')]},
                     {'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}
                 ]).format({'Distance (m)': '{:.1f}'})
-                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                st.dataframe(styled_df, width='stretch', hide_index=True)
             else:
                 st.info("No highways found within 200m.")
             
             st.markdown("---")
             st.markdown("### Amenity Score Analysis (1km Radius)")
-            st.caption("Calculated amenity score based on the proximity and type of amenities within a 1km radius.")
+            st.caption("Calculated amenity score based on all amenities within a 1km radius of the subject location, using standard weights adjustable in the sidebar.")
             
             with st.spinner("Calculating amenities..."):
                 category_df = calculate_amenity_scores(lat, lon, all_amenities, current_weights)
@@ -834,19 +1000,45 @@ def main():
                 st.metric("Amenities Found", len(detailed_df))
             
             st.subheader("Amenity Category Breakdown")
-            st.caption("Breakdown of amenity scores by category, including count and weighted contributions.")
+            st.caption("Breakdown of amenity scores by category, including count and weighted contributions based on amenities within 1km.")
             if not category_df.empty:
+                if category_df['count'].sum() == 0:
+                    st.warning("Unexpected zero count for amenities. This may indicate a data or filtering issue. Check logs for details.")
                 styled_category = category_df[['category', 'count', 'S_c', 's_c', 'weight', 'Weight × s_c']].round(3).style.set_table_styles([
                     {'selector': 'thead th', 'props': [('background-color', '#667eea'), ('color', 'white'), ('font-weight', 'bold')]},
                     {'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}
                 ]).format(precision=3)
-                st.dataframe(styled_category, use_container_width=True, hide_index=True)
+                st.dataframe(styled_category, width='stretch', hide_index=True)
             else:
                 st.info("No amenity data available.")
             
-            # Amenities and Highways Map (Fixed)
-            st.subheader("Amenities and Highways Map")
-            st.caption("Interactive map displaying amenities (colored by category), highways (colored lines by type), and the subject location (red star) within a 1km radius. Hover for details.")
+            with st.expander("View Detailed Amenities (1km Radius)", expanded=False):
+                st.caption("Detailed list of all amenities within a 1km radius, including their type, category, distance, and influence factor (f_d).")
+                if not detailed_df.empty:
+                    amenity_df = detailed_df[['name', 'type_name', 'category', 'distance_m', 'f_d']].rename(
+                        columns={
+                            'name': 'Amenity Name',
+                            'type_name': 'Type',
+                            'category': 'Category',
+                            'distance_m': 'Distance (m)',
+                            'f_d': 'Influence Factor (f_d)'
+                        }
+                    )
+                    amenity_df['Distance (m)'] = amenity_df['Distance (m)'].round(1)
+                    amenity_df['Influence Factor (f_d)'] = amenity_df['Influence Factor (f_d)'].round(3)
+                    styled_amenity_df = amenity_df.style.set_table_styles([
+                        {'selector': 'thead th', 'props': [('background-color', '#667eea'), ('color', 'white'), ('font-weight', 'bold')]},
+                        {'selector': 'tr:hover', 'props': [('background-color', '#f0f2f6')]}
+                    ]).format({
+                        'Distance (m)': '{:.1f}',
+                        'Influence Factor (f_d)': '{:.3f}'
+                    })
+                    st.dataframe(styled_amenity_df, width='stretch', hide_index=True)
+                else:
+                    st.info("No amenities found within 1km.")
+            
+            st.markdown("### Amenities and Highways Map")
+            st.caption("Interactive map displaying all amenities within a 1km radius (colored by category), highways within 200m (colored lines by type, with the widest highway considered for valuation), and the subject location (red circle). Hover for details.")
             if not detailed_df.empty:
                 detailed_df['hover_text'] = detailed_df.apply(
                     lambda row: f"{row['name']}<br>{row['category']}<br>{row['distance_m']:.0f}m", axis=1
@@ -875,7 +1067,6 @@ def main():
                     hovertemplate="%{hovertext}<extra></extra>"
                 )
                 
-                # Add highways to the map with colored lines based on category
                 category_colors = {
                     'A': '#28a745',  # Green
                     'B': '#007bff',  # Blue
@@ -898,22 +1089,21 @@ def main():
                             below=''  # Ensure highways are below markers
                         ))
                 
-                # Add subject location marker
                 fig_amenity.add_trace(go.Scattermapbox(
                     lat=[lat], 
                     lon=[lon], 
                     mode='markers',
                     marker=dict(
-                        size=30,  # Increased size for visibility
+                        size=20,
                         color='red',
-                        symbol='star'
+                        symbol='circle',
+                        opacity=1.0,
+                        sizemode='diameter'
                     ),
                     name="Subject Location",
                     hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>",
-                    below=''  # Ensure marker is on top
                 ))
                 
-                # Reorder traces to ensure subject location is the last trace (rendered on top)
                 traces = list(fig_amenity.data)
                 subject_trace = traces[-1]  # Subject location is the last added
                 other_traces = traces[:-1]
@@ -946,7 +1136,7 @@ def main():
                 )
                 
                 fig_amenity.add_annotation(
-                    text="Note: Amenities are colored by category; highways by type (A: green, B: blue, C: orange, D: red). Subject location marked with a red star.",
+                    text="Note: Amenities (within 1km) are colored by category; highways (within 200m) by type (A: green, B: blue, C: orange, D: red). Subject location marked with a red circle.",
                     xref="paper", 
                     yref="paper", 
                     x=0.01, 
@@ -965,23 +1155,22 @@ def main():
                 
                 st.plotly_chart(fig_amenity, use_container_width=True)
             else:
-                # Display map with only subject location if no amenities
                 fig_amenity = go.Figure()
                 fig_amenity.add_trace(go.Scattermapbox(
                     lat=[lat], 
                     lon=[lon], 
                     mode='markers',
                     marker=dict(
-                        size=30,
+                        size=20,
                         color='red',
-                        symbol='star',
-                        opacity=1.0
+                        symbol='circle',
+                        opacity=1.0,
+                        sizemode='diameter'
                     ),
                     name="Subject Location",
-                    hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
+                    hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>",
                 ))
                 
-                # Add highways even if no amenities
                 category_colors = {
                     'A': '#28a745',
                     'B': '#007bff',
@@ -1035,7 +1224,7 @@ def main():
                 )
                 
                 fig_amenity.add_annotation(
-                    text="Note: No amenities found within 1km. Subject location marked with a red star; highways by type (A: green, B: blue, C: orange, D: red).",
+                    text="Note: No amenities found within 1km. Highways within 200m shown by type (A: green, B: blue, C: orange, D: red). Subject location marked with a red circle.",
                     xref="paper", 
                     yref="paper", 
                     x=0.01, 
@@ -1055,26 +1244,30 @@ def main():
                 st.plotly_chart(fig_amenity, use_container_width=True)
                 st.info("No amenities found within 1km, showing subject location and highways.")
             
-            if dist_km >= 0.5:
-                st.markdown("### Nearest Cluster Projects")
-                st.caption("Map of projects in the nearest cluster, showing their locations and rates.")
-                for col, clus in cluster_info.items():
-                    if pd.notna(clus):
-                        fig = plot_cluster_map(project_df, col, clus, f"Nearest {col}: {clus}", subject_lat=lat, subject_lon=lon)
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                        break
-            
             st.markdown("### Regression Analysis")
-            st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate.")
-            selected_cluster = cluster_info.get('Cluster_LatLong', cluster_info.get('Cluster_LatLongCategory'))
-            if pd.notna(selected_cluster):
-                category = 'LatLong' if 'Cluster_LatLong' in cluster_info else 'LatLongCategory'
-                show_regression_visuals(regression_data, selected_cluster, category)
+            st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate for the selected cluster.")
+            selected_cluster_latlong = cluster_info.get('Cluster_LatLong')
+            selected_cluster_category = cluster_info.get('Cluster_LatLongCategory')
+            
+            if pd.notna(selected_cluster_latlong) or pd.notna(selected_cluster_category):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("LatLong Cluster Regression")
+                    if pd.notna(selected_cluster_latlong):
+                        show_regression_visuals(regression_data, selected_cluster_latlong, 'LatLong')
+                    else:
+                        st.info("No LatLong cluster data available.")
+                
+                with col2:
+                    st.subheader("LatLongCategory Cluster Regression")
+                    if pd.notna(selected_cluster_category):
+                        show_regression_visuals(regression_data, selected_cluster_category, 'LatLongCategory')
+                    else:
+                        st.info("No LatLongCategory cluster data available.")
             
             st.markdown("### Valuation Prediction")
-            st.caption("Estimated property rate per square foot based on regression models using amenity score and road category.")
-            
+            st.caption("Estimated property rate per square foot based on regression models using amenity score and the widest highway within 200m.")
             highway_map = {'A': 1, 'B': 2, 'C': 3, 'D': 4}
             road = highway_map.get(nearest_biggest_highway['category'], 2)
             predicted_amenity = float(category_df['total_score'].iloc[0]) if not category_df.empty else 0.0
@@ -1082,8 +1275,8 @@ def main():
             latlong_pred = 'N/A'
             latlong_eq = 'N/A'
             sheet_latlong = 'LatLong_Both_vs_Rate'
-            if sheet_latlong in regression_data and not regression_data[sheet_latlong].empty:
-                row = regression_data[sheet_latlong][regression_data[sheet_latlong]['Cluster'] == cluster_info.get('Cluster_LatLong')]
+            if pd.notna(selected_cluster_latlong) and sheet_latlong in regression_data and not regression_data[sheet_latlong].empty:
+                row = regression_data[sheet_latlong][regression_data[sheet_latlong]['Cluster'] == selected_cluster_latlong]
                 if not row.empty:
                     row = row.iloc[0]
                     latlong_pred = row['Slope_Amenity'] * predicted_amenity + row['Slope_RoadCat'] * road + row['Intercept']
@@ -1092,8 +1285,8 @@ def main():
             category_pred = 'N/A'
             category_eq = 'N/A'
             sheet_category = 'LatLongCategory_Amenity_vs_Rate'
-            if sheet_category in regression_data and not regression_data[sheet_category].empty:
-                row = regression_data[sheet_category][regression_data[sheet_category]['Cluster'] == cluster_info.get('Cluster_LatLongCategory')]
+            if pd.notna(selected_cluster_category) and sheet_category in regression_data and not regression_data[sheet_category].empty:
+                row = regression_data[sheet_category][regression_data[sheet_category]['Cluster'] == selected_cluster_category]
                 if not row.empty:
                     row = row.iloc[0]
                     category_pred = row['Slope_Amenity'] * predicted_amenity + row['Intercept']
