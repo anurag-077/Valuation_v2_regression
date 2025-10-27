@@ -453,7 +453,7 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map", subject_
         hover_name='hover_text',
         color='Mid_Rate',
         color_continuous_scale='viridis',
-        zoom=11,
+        zoom=12,  # Reduced zoom for more context
         height=500,
         title=f"{title} - Projects in Cluster {cluster_num if cluster_num is not None else 'All'}",
         labels={'Mid_Rate': 'Rate (₹ per sqft)'}
@@ -488,20 +488,41 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map", subject_
                 logging.warning(f"Failed to compute convex hull for cluster {cluster_num}: {e}")
                 st.warning(f"Could not draw boundary for cluster {cluster_num} due to insufficient point variation.")
     
+    # Add subject location as the last trace to ensure it's on top
     if subject_lat is not None and subject_lon is not None:
+        logging.info(f"Adding subject location marker at lat={subject_lat}, lon={subject_lon}")
         fig.add_trace(go.Scattermapbox(
             lat=[subject_lat],
             lon=[subject_lon],
             mode='markers',
-            marker=dict(size=20, color='red', symbol='star', opacity=1.0),
+            marker=dict(
+                size=30,
+                color='red',
+                symbol='circle',
+                opacity=1.0,
+                sizemode='diameter'
+            ),
             name="Subject Location",
-            hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
+            hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>",
+            showlegend=True
         ))
+        # Debug: Log the trace details
+        logging.info(f"Subject location trace added: {fig.data[-1]}")
+    
+    # Center the map on the subject location if provided
+    if subject_lat is not None and subject_lon is not None:
+        fig.update_layout(
+            mapbox=dict(
+                center=dict(lat=subject_lat, lon=subject_lon),
+                zoom=12  # Match initial zoom
+            )
+        )
     
     fig.update_layout(
         mapbox_style="open-street-map",
         margin=dict(t=60, b=60),
         hovermode='closest',
+        showlegend=True,
         legend=dict(
             title="Rate (₹ per sqft)",
             orientation="h",
@@ -511,15 +532,35 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map", subject_
             x=0.5,
             bgcolor="rgba(255,255,255,0.9)",
             bordercolor="gray",
-            borderwidth=1
+            borderwidth=1,
+            font=dict(size=11)
+        ),
+        title=dict(
+            text=title,
+            x=0.5,
+            xanchor="center",
+            font=dict(size=18)
         )
     )
+    
     fig.add_annotation(
-        text="Note: Points represent projects colored by their mid rate. Cluster boundaries shown where applicable.",
+        text="Note: Points represent projects colored by their mid rate. Cluster boundaries shown where applicable. Subject location marked with a red circle. Use mouse scroll or zoom buttons to adjust view.",
         xref="paper", yref="paper", x=0.01, y=0.01,
         showarrow=False, font=dict(size=12, color="gray"),
         bgcolor="white", bordercolor="gray", borderwidth=1
     )
+    
+    # Enable interactive controls
+    fig.update_layout(
+        mapbox=dict(
+            pitch=0,
+            bearing=0,
+            zoom=12  # Ensure consistent zoom
+        ),
+        dragmode='zoom',  # Enable zoom/pan interactivity
+        uirevision='map'  # Preserve map state on updates
+    )
+    
     return fig
 
 def show_regression_visuals(regression_data, cluster_num, category):
@@ -945,22 +986,14 @@ def main():
                     st.metric("Nearest Major Highway", "None found")
             
             st.markdown("### Nearest Cluster Projects")
-            st.caption("Map of projects in the selected cluster, with the subject location highlighted as a red star. Use buttons above to switch cluster type.")
+            st.caption("Map of projects in the selected cluster, with the subject location highlighted as a red circle. Use buttons above to switch cluster type.")
             cluster_type = st.session_state['selected_cluster_type']
             selected_cluster = cluster_info.get(cluster_type)
             if pd.notna(selected_cluster):
                 fig = plot_cluster_map(project_df, cluster_type, selected_cluster, title=f"Nearest {cluster_type}: {selected_cluster}", subject_lat=lat, subject_lon=lon)
                 if fig:
-                    # Ensure subject location is a red star
-                    fig.data = [trace for trace in fig.data if trace.name != "Subject Location"]
-                    fig.add_trace(go.Scattermapbox(
-                        lat=[lat],
-                        lon=[lon],
-                        mode='markers',
-                        marker=dict(size=20, color='red', symbol='star', opacity=1.0),
-                        name="Subject Location",
-                        hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>"
-                    ))
+                    # Debug: Print trace details
+                    logging.info(f"Cluster map traces: {fig.data}")
                     st.plotly_chart(fig, use_container_width=True, key=f"cluster_map_{cluster_type}_{selected_cluster}")
             else:
                 st.warning(f"No valid {cluster_type} cluster found for this location.")
