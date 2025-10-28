@@ -327,16 +327,23 @@ def haversine_distance(lat1, lon1, lats2, lons2):
     c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1-a))
     return 6371000 * c
 
-def find_nearest_cluster(df, lat, lon, cluster_cols=['Cluster_LatLong', 'Cluster_LatLongCategory']):
+def find_nearest_cluster(df, lat, lon, cluster_cols=['Cluster_LatLong', 'Cluster_LatLongCategory'], max_dist_km=5.0):
+    if df.empty:
+        return {}, float('inf'), None
+
     distances = haversine_distance(lat, lon, df['project_lat'].values, df['project_lng'].values)
     min_idx = np.argmin(distances)
     min_dist_km = distances[min_idx] / 1000
-    
+
+    if min_dist_km > max_dist_km:
+        logging.warning(f"Nearest project is {min_dist_km:.1f} km away (> {max_dist_km} km). No cluster assigned.")
+        return {}, min_dist_km, None  # No cluster assigned
+
     cluster_info = {}
     for col in cluster_cols:
         if col in df.columns:
             cluster_info[col] = df.iloc[min_idx][col]
-    
+
     return cluster_info, min_dist_km, df.iloc[min_idx]
 
 def overpass_query_any(lat: float, lon: float, radius_m: int = SEARCH_RADIUS_M, timeout_s: int = 300, max_retries: int = 5) -> dict:
@@ -896,7 +903,7 @@ def main():
                        'Cluster_LatLongCategory': 'LatLongCategory'}
         category = category_map.get(cluster_type, 'LatLong')
         st.subheader("Regression Analysis")
-        st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate for the selected cluster.")
+        st.caption("Regression models help us understand how property prices change based on factors such as nearby amenities and road quality in a given area or cluster.")
         if selected_cluster != 'All':
             show_regression_visuals(regression_data, selected_cluster, category)
         else:
@@ -1280,7 +1287,7 @@ def main():
                 st.info("No amenities found within 1km, showing subject location and highways.")
             
             st.markdown("### Regression Analysis")
-            st.caption("Regression models illustrating the relationship between variables (amenity score, road category) and property rate for the selected cluster.")
+            st.caption("Regression models help us understand how property prices change based on factors such as nearby amenities and road quality in a given area or cluster.")
             selected_cluster_latlong = cluster_info.get('Cluster_LatLong')
             selected_cluster_category = cluster_info.get('Cluster_LatLongCategory')
             
@@ -1331,11 +1338,11 @@ def main():
             col_pred1, col_pred2 = st.columns(2)
             with col_pred1:
                 st.markdown("**LatLong Cluster Prediction**")
-                st.info(f"Predicted Rate: ₹{latlong_pred:.0f} per sqft" if latlong_pred != 'N/A' else "No data available")
+                st.info(f"Predicted Rate on Salable Area: ₹{latlong_pred:.0f} per sqft" if latlong_pred != 'N/A' else "No data available")
                 st.caption(f"Model: {latlong_eq} (uses amenity score and road category: A=1, B=2, C=3, D=4)")
             with col_pred2:
                 st.markdown("**LatLongCategory Cluster Prediction**")
-                st.info(f"Predicted Rate: ₹{category_pred:.0f} per sqft" if category_pred != 'N/A' else "No data available")
+                st.info(f"Predicted Rate on Salable Area: ₹{category_pred:.0f} per sqft" if category_pred != 'N/A' else "No data available")
                 st.caption(f"Model: {category_eq} (uses amenity score)")
 
 if __name__ == "__main__":
