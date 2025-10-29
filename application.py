@@ -1338,12 +1338,34 @@ def main():
             col_pred1, col_pred2 = st.columns(2)
             with col_pred1:
                 st.markdown("**LatLong Cluster Prediction**")
-                st.info(f"Predicted Rate on Salable Area: ₹{latlong_pred:.0f} per sqft" if latlong_pred != 'N/A' else "No data available")
-                st.caption(f"Model: {latlong_eq} (uses amenity score and road category: A=1, B=2, C=3, D=4)")
+                if latlong_pred != 'N/A':
+                    cluster_avg = project_df[
+                        project_df['Cluster_LatLong'] == selected_cluster_latlong
+                    ]['Mid_Rate'].mean()
+                    st.info(
+                        f"**Predicted Rate (Salable Area):** ₹{latlong_pred:,.0f} / sqft  \n"
+                        f"**Cluster Avg Rate (Salable Area):** ₹{cluster_avg:,.0f} / sqft"
+                    )
+                else:
+                    st.info("No data available")
+                st.caption(
+                    f"Model: {latlong_eq}\n"
+                    "(uses amenity score + road category: A=1, B=2, C=3, D=4)"
+                )
+
             with col_pred2:
                 st.markdown("**LatLongCategory Cluster Prediction**")
-                st.info(f"Predicted Rate on Salable Area: ₹{category_pred:.0f} per sqft" if category_pred != 'N/A' else "No data available")
-                st.caption(f"Model: {category_eq} (uses amenity score)")
+                if category_pred != 'N/A':
+                    cluster_avg = project_df[
+                        project_df['Cluster_LatLongCategory'] == selected_cluster_category
+                    ]['Mid_Rate'].mean()
+                    st.info(
+                        f"**Predicted Rate (Salable Area):** ₹{category_pred:,.0f} / sqft  \n"
+                        f"**Cluster Avg Rate (Salable Area):** ₹{cluster_avg:,.0f} / sqft"
+                    )
+                else:
+                    st.info("No data available")
+                st.caption(f"Model: {category_eq}\n(uses amenity score only)")
 
 if __name__ == "__main__":
     main()
