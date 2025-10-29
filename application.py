@@ -440,6 +440,23 @@ def get_highways_within_radius(lat: float, lon: float) -> tuple:
         logging.error(f"Error querying roads for lat={lat}, lon={lon}: {e}")
         return [], {"category": None, "category_label": None, "distance_m": None, "name": None}
 
+def cluster_summary(df: pd.DataFrame, cluster_col: str, cluster_id) -> dict:
+    """Return a dict with min / max / percentiles for a given cluster."""
+    if pd.isna(cluster_id):
+        return {}
+    sub = df[df[cluster_col] == cluster_id]['Mid_Rate']
+    if sub.empty:
+        return {}
+    return {
+        "Min": sub.min(),
+        "Max": sub.max(),
+        "50th (Median)": sub.quantile(0.50),
+        "75th": sub.quantile(0.75),
+        "90th": sub.quantile(0.90),
+        "95th": sub.quantile(0.95),
+    }
+
+
 def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map", subject_lat=None, subject_lon=None):
     filtered = df.copy()
     
@@ -507,7 +524,7 @@ def plot_cluster_map(df, cluster_col, cluster_num, title="Cluster Map", subject_
                 color='red',
                 symbol='circle',
                 opacity=1.0,
-                sizemode='diameter'
+                sizemode='area'
             ),
             name="Subject Location",
             hovertemplate="<b>Subject Location</b><br>Lat: %{lat:.4f}<br>Lon: %{lon:.4f}<extra></extra>",
@@ -1343,8 +1360,7 @@ def main():
                         project_df['Cluster_LatLong'] == selected_cluster_latlong
                     ]['Mid_Rate'].mean()
                     st.info(
-                        f"**Predicted Rate (Salable Area):** ₹{latlong_pred:,.0f} / sqft  \n"
-                        f"**Cluster Avg Rate (Salable Area):** ₹{cluster_avg:,.0f} / sqft"
+                        f"**Predicted Rate (Salable Area):** ₹{latlong_pred:,.0f} / sqft"
                     )
                 else:
                     st.info("No data available")
@@ -1360,12 +1376,49 @@ def main():
                         project_df['Cluster_LatLongCategory'] == selected_cluster_category
                     ]['Mid_Rate'].mean()
                     st.info(
-                        f"**Predicted Rate (Salable Area):** ₹{category_pred:,.0f} / sqft  \n"
-                        f"**Cluster Avg Rate (Salable Area):** ₹{cluster_avg:,.0f} / sqft"
+                        f"**Predicted Rate (Salable Area):** ₹{category_pred:,.0f} / sqft"
                     )
                 else:
                     st.info("No data available")
                 st.caption(f"Model: {category_eq}\n(uses amenity score only)")
+                
+            # ----- NEW COLLAPSIBLE CLUSTER SUMMARY -----
+            with st.expander("Show Cluster Summary", expanded=False):
+                st.caption("Statistical distribution of **Mid_Rate** for the two nearest clusters.")
+                
+                # LatLong cluster
+                if pd.notna(selected_cluster_latlong):
+                    latlong_stats = cluster_summary(project_df, 'Cluster_LatLong', selected_cluster_latlong)
+                    if latlong_stats:
+                        st.markdown("**LatLong Cluster**")
+                        latlong_df = pd.DataFrame.from_dict(
+                            latlong_stats, orient='index', columns=['Rate (₹/sqft)']
+                        ).round(0).astype(int)
+                        st.dataframe(
+                            latlong_df.style.format("{:,}"),
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("No rate data for the LatLong cluster.")
+                else:
+                    st.info("LatLong cluster not available.")
+                
+                # LatLongCategory cluster
+                if pd.notna(selected_cluster_category):
+                    cat_stats = cluster_summary(project_df, 'Cluster_LatLongCategory', selected_cluster_category)
+                    if cat_stats:
+                        st.markdown("**LatLongCategory Cluster**")
+                        cat_df = pd.DataFrame.from_dict(
+                            cat_stats, orient='index', columns=['Rate (₹/sqft)']
+                        ).round(0).astype(int)
+                        st.dataframe(
+                            cat_df.style.format("{:,}"),
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("No rate data for the LatLongCategory cluster.")
+                else:
+                    st.info("LatLongCategory cluster not available.")
 
 if __name__ == "__main__":
     main()
