@@ -450,6 +450,7 @@ def cluster_summary(df: pd.DataFrame, cluster_col: str, cluster_id) -> dict:
     return {
         "Min": sub.min(),
         "Max": sub.max(),
+        "Average": sub.mean(),
         "50th (Median)": sub.quantile(0.50),
         "75th": sub.quantile(0.75),
         "90th": sub.quantile(0.90),
