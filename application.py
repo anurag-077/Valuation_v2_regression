@@ -789,6 +789,27 @@ def main():
         regression_data = load_regression_data()
         all_amenities = load_amenities("amenities")
     
+    # ========================
+    # ABOUT CLUSTERING (SHARED)
+    # ========================
+    with st.expander("About Clusters – How We Group Projects", expanded=False):
+        st.markdown("""
+        **Clusters = Micro-Markets**  
+        We group similar projects for **fair & accurate pricing**.
+
+        ---
+        **1. LatLong Clusters**  
+        → Grouped **by location only**.  
+        *Use when*: Projects are in the **same micro-market**.
+
+        ---
+        **2. LatLongCategory Clusters**  
+        → Grouped by **location + road type** (A, B, C, D).  
+        *Use when*: A project on a **main road** ≠ one on a **narrow lane**.
+
+        **Result**: **Smarter, more realistic valuations**.
+        """)
+    
     tab1, tab2 = st.tabs(["Cluster Explorer", "Location Analyzer"])
     
     with tab1:
