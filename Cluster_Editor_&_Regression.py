@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import math
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 import plotly.graph_objects as go
@@ -15,8 +16,14 @@ AMENITY_DIR = "amenities"
 POI_SEARCH_RADIUS_M = 1000
 
 DEFAULT_WEIGHTS = {
-    "Metro": 0.25, "Bus": 0.15, "Mall": 0.225,
-    "School": 0.225, "Hospital": 0.075, "Garden": 0.075
+    "Metro": 0.25, "Bus": 0.15, "Mall": 0.23,
+    "School": 0.23, "Hospital": 0.07, "Garden": 0.07
+}
+
+DEFAULT_RATE_RANGES = {
+    "Affordable": (0, 7000),
+    "Mid-Segment": (7000, 13000),
+    "Luxury": (13000, float('inf'))
 }
 
 AMENITY_TO_CATEGORY = {
@@ -36,7 +43,6 @@ AMENITY_TO_CATEGORY = {
 # UTILS
 # --------------------------------------------------------------
 def haversine_vectorized(lat1, lon1, lats2, lons2):
-    import numpy as np
     lat1, lon1, lats2, lons2 = map(np.radians, [lat1, lon1, lats2, lons2])
     dlat = lats2 - lat1
     dlon = lons2 - lon1
@@ -47,9 +53,6 @@ def haversine_vectorized(lat1, lon1, lats2, lons2):
 def decay(d):
     return 1.0 / (1.0 + min(d, POI_SEARCH_RADIUS_M) / 200.0)
 
-# --------------------------------------------------------------
-# Load Amenities
-# --------------------------------------------------------------
 @st.cache_data
 def load_amenities():
     if not os.path.exists(AMENITY_DIR):
@@ -76,9 +79,6 @@ def load_amenities():
             continue
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-# --------------------------------------------------------------
-# Amenity Score
-# --------------------------------------------------------------
 def compute_amenity_score(lat, lng, amenities, weights):
     if amenities.empty:
         return 0.0
@@ -92,121 +92,209 @@ def compute_amenity_score(lat, lng, amenities, weights):
         if not mask.any():
             continue
         decays = [decay(d) for d in dists[mask]]
-        decays.sort(reverse=True)
-        top3 = sum(decays[:3])
-        total += w * min(1.0, top3)
+        S_c = sum(decays)
+        s_c = 1 - math.exp(-0.8 * S_c)
+        total += w * s_c
     return round(total, 3)
+
+def categorize_rate(rate, ranges):
+    for cat, (low, high) in ranges.items():
+        if low <= rate < high:
+            return cat
+    return "Luxury"
 
 # --------------------------------------------------------------
 # MAIN APP
 # --------------------------------------------------------------
 st.set_page_config(page_title="Cluster Editor & Regression", layout="wide")
 st.title("Cluster Editor & Regression Trainer")
-st.caption("3-decimal scores | DB default | Recalculates on weight change | **No NaN crash**")
+st.caption("**Instant edits** | **Train on selected rows only** | **Rate on Salable Area**")
 
-if not os.path.exists(EXCEL_FILE):
-    st.error(f"`{EXCEL_FILE}` not found!")
-    st.stop()
-
-with st.spinner("Loading data..."):
-    project_df = pd.read_excel(EXCEL_FILE)
-
-# Ensure Project_ID
-if 'Project_ID' not in project_df.columns:
-    project_df['Project_ID'] = [f"P{i:04d}" for i in range(1, len(project_df)+1)]
-
-required = ['Project_Name', 'Mid_Rate', 'project_lat', 'project_lng',
-            'Cluster_LatLong', 'Cluster_LatLongCategory']
-for c in required:
-    if c not in project_df.columns:
-        st.error(f"Missing: `{c}`")
+# === LOAD DATA ONCE ===
+if 'project_df' not in st.session_state:
+    if not os.path.exists(EXCEL_FILE):
+        st.error(f"`{EXCEL_FILE}` not found!")
         st.stop()
+    with st.spinner("Loading data..."):
+        df = pd.read_excel(EXCEL_FILE)
+        if 'Project_ID' not in df.columns:
+            df['Project_ID'] = [f"P{i:04d}" for i in range(1, len(df)+1)]
+        required = ['Project_Name', 'Mid_Rate', 'project_lat', 'project_lng',
+                    'Cluster_LatLong', 'Cluster_LatLongCategory']
+        for c in required:
+            if c not in df.columns:
+                st.error(f"Missing: `{c}`")
+                st.stop()
+        defaults = [('Road_Category','B'), ('total fsi (sqmtr)',1000.0),
+                    ('Age_Of_The_Building_Till_11thOct2025',5)]
+        for c, d in defaults:
+            if c not in df.columns:
+                df[c] = d
+        df['amenity_score'] = df.get('amenity_score', df.get('Amenity_Raw_R_0_1', 0.0))
+        st.session_state.project_df = df
 
-# Default columns
-defaults = [('Road_Category','B'), ('total fsi (sqmtr)',1000.0),
-            ('Age_Of_The_Building_Till_11thOct2025',5)]
-for c, d in defaults:
-    if c not in project_df.columns:
-        project_df[c] = d
-
-# Use DB amenity score
-project_df['amenity_score'] = project_df.get('amenity_score',
-                                            project_df.get('Amenity_Raw_R_0_1', 0.0))
+project_df = st.session_state.project_df
 
 # --------------------------------------------------------------
 # SIDEBAR
 # --------------------------------------------------------------
 with st.sidebar:
     st.header("Amenity Weights")
+    if 'custom_weights' not in st.session_state:
+        st.session_state.custom_weights = DEFAULT_WEIGHTS.copy()
+    if 'weights_applied' not in st.session_state:
+        st.session_state.weights_applied = False
+
     weights = {}
-    total_w = 0
-    for cat, val in DEFAULT_WEIGHTS.items():
-        w = st.number_input(cat, 0.0, 1.0, val, step=0.01, key=f"wt_{cat}")
+    for cat, default_val in DEFAULT_WEIGHTS.items():
+        current_val = st.session_state.custom_weights.get(cat, default_val)
+        w = st.number_input(cat, 0.0, 1.0, current_val, 0.01, key=f"wt_{cat}")
         weights[cat] = w
-        total_w += w
-    st.metric("Total Weight", f"{total_w:.2f}")
-    weights_changed = any(abs(w - DEFAULT_WEIGHTS[cat]) > 0.001 for cat, w in weights.items())
+    st.metric("Total Weight", f"{sum(weights.values()):.2f}")
+
+    st.markdown("---")
+    st.subheader("Rate Category Ranges (₹/sqft on Salable Area)")
+
+    if 'rate_ranges' not in st.session_state:
+        st.session_state.rate_ranges = DEFAULT_RATE_RANGES.copy()
+
+    r1 = st.number_input("Affordable: Up to", value=st.session_state.rate_ranges["Affordable"][1], step=500, key="r1")
+    r2 = st.number_input("Mid-Segment: From", value=st.session_state.rate_ranges["Mid-Segment"][0], step=500, key="r2")
+    r3 = st.number_input("Mid-Segment: Up to", value=st.session_state.rate_ranges["Mid-Segment"][1], step=500, key="r3")
+    r4 = st.number_input("Luxury: Above", value=st.session_state.rate_ranges["Luxury"][0], step=500, key="r4")
+
+    updated_ranges = {
+        "Affordable": (0, r1),
+        "Mid-Segment": (r2, r3),
+        "Luxury": (r4, float('inf'))
+    }
+    st.session_state.rate_ranges = updated_ranges
+
+    st.caption(f"**Current:**\n• Affordable: < ₹{r1:,}\n• Mid-Segment: ₹{r2:,} – ₹{r3:,}\n• Luxury: > ₹{r4:,}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        apply_btn = st.button("Apply Weights", type="primary")
+    with col2:
+        reset_btn = st.button("Reset", type="secondary")
+
+    if reset_btn:
+        st.session_state.custom_weights = DEFAULT_WEIGHTS.copy()
+        st.session_state.rate_ranges = DEFAULT_RATE_RANGES.copy()
+        st.session_state.weights_applied = False
+        # Fully clear recalc & cluster state
+        for key in list(st.session_state.keys()):
+            if key.startswith("recalc_") or key.startswith("cluster_"):
+                if key in st.session_state:
+                    del st.session_state[key]
+        st.success("Reset! Reverting to DB scores.")
+        st.rerun()
+
+    if apply_btn:
+        st.session_state.custom_weights = weights.copy()
+        st.session_state.weights_applied = True
+        st.success("Weights applied! Recalculating scores...")
+        # FORCE RECALC EVERY TIME
+        for key in list(st.session_state.keys()):
+            if key.startswith("recalc_"):
+                if key in st.session_state:
+                    del st.session_state[key]
+        st.rerun()
+
+    active_weights = st.session_state.custom_weights
+    rate_ranges = st.session_state.rate_ranges
 
     st.header("Regression Features")
     feature_options = {
         "Amenity Score": "amenity_score",
         "Road Category": "road_numeric",
         "Total FSI": "total fsi (sqmtr)",
-        "Age": "Age_Of_The_Building_Till_11thOct2025"
+        "Age": "Age_Of_The_Building_Till_11thOct2025",
+        "Project Category": "category_encoded"
     }
     selected_features = st.multiselect(
         "Select features", list(feature_options.keys()),
-        default=["Amenity Score", "Road Category"]
+        default=["Amenity Score", "Road Category"],
+        key="feat_sel"
     )
 
 # --------------------------------------------------------------
-# CLUSTER SELECTION
+# CLUSTER SELECTION (PERSISTENT)
 # --------------------------------------------------------------
 col1, col2 = st.columns([1, 3])
 with col1:
-    cluster_type = st.selectbox("Cluster Type", ['Cluster_LatLong', 'Cluster_LatLongCategory'])
+    cluster_type = st.selectbox("Cluster Type", ['Cluster_LatLong', 'Cluster_LatLongCategory'], key="ctype")
 with col2:
     clusters = sorted(project_df[cluster_type].dropna().unique())
-    selected_cluster = st.selectbox("Select Cluster", clusters)
+    # Persist selection
+    last_key = f"last_cluster_{cluster_type}"
+    if last_key not in st.session_state:
+        st.session_state[last_key] = clusters[0]
+    selected_cluster = st.selectbox("Select Cluster", clusters, 
+                                    index=clusters.index(st.session_state[last_key]) if st.session_state[last_key] in clusters else 0,
+                                    key="cluster_sel")
+st.session_state[last_key] = selected_cluster
 
-cluster_df = project_df[project_df[cluster_type] == selected_cluster].copy().reset_index(drop=True)
+# === ISOLATE CLUSTER ===
+cluster_key = f"cluster_{cluster_type}_{selected_cluster}"
+if cluster_key not in st.session_state:
+    cluster_df = project_df[project_df[cluster_type] == selected_cluster].copy().reset_index(drop=True)
+    cluster_df['_original_amenity'] = cluster_df['amenity_score']
+    st.session_state[cluster_key] = cluster_df
+else:
+    cluster_df = st.session_state[cluster_key]
 
 # --------------------------------------------------------------
-# RECALCULATE SCORES
+# RECALCULATE AMENITY SCORES
 # --------------------------------------------------------------
 all_amenities = load_amenities()
-if weights_changed and not all_amenities.empty:
-    st.info("Recalculating scores...")
-    scores = [
-        compute_amenity_score(row['project_lat'], row['project_lng'], all_amenities, weights)
-        for _, row in cluster_df.iterrows()
-    ]
-    cluster_df['amenity_score'] = scores
-    st.success("Scores updated!")
-else:
-    st.info("Using **DB scores**")
+recalc_key = f"recalc_{cluster_key}"
 
-# Road numeric
+if st.session_state.weights_applied and not all_amenities.empty:
+    if recalc_key not in st.session_state:
+        with st.spinner("Recalculating amenity scores..."):
+            scores = [
+                compute_amenity_score(row['project_lat'], row['project_lng'], all_amenities, active_weights)
+                for _, row in cluster_df.iterrows()
+            ]
+            cluster_df['amenity_score'] = scores
+            st.session_state[recalc_key] = True
+        st.success("Scores updated!")
+else:
+    # Revert to original if not applied
+    if not st.session_state.weights_applied and recalc_key in st.session_state:
+        cluster_df['amenity_score'] = cluster_df['_original_amenity']
+        del st.session_state[recalc_key]
+    st.info("Using DB scores")
+
 road_map = {'A':1, 'B':2, 'C':3, 'D':4}
 cluster_df['road_numeric'] = cluster_df['Road_Category'].map(road_map).fillna(2)
 
 # --------------------------------------------------------------
-# EDITABLE TABLE
+# PREPARE DISPLAY + EDIT TABLE
 # --------------------------------------------------------------
-st.subheader(f"Projects in `{selected_cluster}`")
+cluster_df['Rate_on_Salable'] = pd.to_numeric(cluster_df['Mid_Rate'], errors='coerce').fillna(0)
+cluster_df['Category'] = cluster_df['Rate_on_Salable'].apply(lambda x: categorize_rate(x, rate_ranges))
+cluster_df['Category_Affordable'] = (cluster_df['Category'] == 'Affordable').astype(int)
+cluster_df['Category_MidSegment'] = (cluster_df['Category'] == 'Mid-Segment').astype(int)
 
 cluster_df['amenity_numeric'] = pd.to_numeric(cluster_df['amenity_score'], errors='coerce').fillna(0.0)
 cluster_df['amenity_display'] = cluster_df['amenity_numeric'].apply(lambda x: f"{x:.3f}")
 
 display_df = cluster_df[[
-    'Project_ID', 'Project_Name', 'Mid_Rate', 'Road_Category',
-    'amenity_display', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025'
+    'Project_ID', 'Project_Name', 'Rate_on_Salable', 'Road_Category',
+    'amenity_display', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025', 'Category'
 ]].copy()
 
 display_df.columns = [
-    'Project ID', 'Project Name', 'Rate (₹/sqft)', 'Road Type',
-    'Amenity Score', 'Total FSI', 'Age (Years)'
+    'Project ID', 'Project Name', 'Rate (₹/sqft on Salable Area)', 'Road Type',
+    'Amenity Score', 'Total FSI', 'Age (Years)', 'Category'
 ]
+
+# ADD SELECT COLUMN
+display_df['Select'] = display_df.index.isin(st.session_state.get(f"selected_{cluster_key}", []))
+
+st.subheader(f"Projects in `{selected_cluster}` | **Check to train**")
 
 edited_df = st.data_editor(
     display_df,
@@ -215,76 +303,103 @@ edited_df = st.data_editor(
     column_config={
         "Project ID": st.column_config.TextColumn(disabled=True),
         "Amenity Score": st.column_config.TextColumn(disabled=True),
+        "Category": st.column_config.TextColumn(disabled=True),
         "Road Type": st.column_config.SelectboxColumn(options=['A','B','C','D']),
-        "Rate (₹/sqft)": st.column_config.NumberColumn(format="₹%.0f"),
+        "Rate (₹/sqft on Salable Area)": st.column_config.NumberColumn(format="₹%.0f"),
         "Total FSI": st.column_config.NumberColumn(format="%.0f"),
-        "Age (Years)": st.column_config.NumberColumn(format="%.1f")
+        "Age (Years)": st.column_config.NumberColumn(format="%.1f"),
+        "Select": st.column_config.CheckboxColumn("Select", default=False)
     },
-    hide_index=False
+    hide_index=False,
+    key=f"editor_{cluster_key}"
 )
 
-# SYNC EDITS + CLEAN NaN
-cluster_df['Mid_Rate'] = pd.to_numeric(edited_df['Rate (₹/sqft)'], errors='coerce')
-cluster_df['Road_Category'] = edited_df['Road Type']
-cluster_df['total fsi (sqmtr)'] = pd.to_numeric(edited_df['Total FSI'], errors='coerce')
-cluster_df['Age_Of_The_Building_Till_11thOct2025'] = pd.to_numeric(edited_df['Age (Years)'], errors='coerce')
+# === INSTANT SYNC ===
+cluster_df.loc[edited_df.index, 'Rate_on_Salable'] = pd.to_numeric(edited_df['Rate (₹/sqft on Salable Area)'], errors='coerce')
+cluster_df.loc[edited_df.index, 'Road_Category'] = edited_df['Road Type']
+cluster_df.loc[edited_df.index, 'total fsi (sqmtr)'] = pd.to_numeric(edited_df['Total FSI'], errors='coerce')
+cluster_df.loc[edited_df.index, 'Age_Of_The_Building_Till_11thOct2025'] = pd.to_numeric(edited_df['Age (Years)'], errors='coerce')
 cluster_df['road_numeric'] = cluster_df['Road_Category'].map(road_map).fillna(2)
-cluster_df['amenity_score'] = cluster_df['amenity_numeric']
 
-# --------------------------------------------------------------
-# TRAIN MODEL – NO NaN ALLOWED
-# --------------------------------------------------------------
-if st.button("Train Model", type="primary", use_container_width=True):
+# Recompute Category
+cluster_df['Category'] = cluster_df['Rate_on_Salable'].apply(lambda x: categorize_rate(x, rate_ranges))
+cluster_df['Category_Affordable'] = (cluster_df['Category'] == 'Affordable').astype(int)
+cluster_df['Category_MidSegment'] = (cluster_df['Category'] == 'Mid-Segment').astype(int)
+cluster_df['Mid_Rate'] = cluster_df['Rate_on_Salable']
+
+# Save selected
+selected_mask = edited_df['Select']
+st.session_state[f"selected_{cluster_key}"] = edited_df[selected_mask].index.tolist()
+train_df = cluster_df.loc[st.session_state[f"selected_{cluster_key}"]].copy()
+
+if len(train_df) == 0:
+    st.warning("**No rows selected. Check 'Select' to train.**")
+else:
+    st.success(f"**{len(train_df)} projects selected**")
+
+# === TRAIN ===
+if st.button("Train Model on Selected Rows", type="primary", use_container_width=True):
     if not selected_features:
         st.error("Select at least one feature.")
+    elif len(train_df) < 2:
+        st.error("Need at least 2 selected projects.")
     else:
-        # Build feature matrix
-        X_cols = [feature_options[f] for f in selected_features]
-        X = cluster_df[X_cols].copy()
-        y = cluster_df['Mid_Rate'].copy()
+        X_cols = []
+        display_names = []
+        for f in selected_features:
+            if f == "Project Category":
+                X_cols.extend(['Category_Affordable', 'Category_MidSegment'])
+                display_names.extend(['Affordable', 'Mid-Segment'])
+            else:
+                X_cols.append(feature_options[f])
+                display_names.append(f)
 
-        # CRITICAL: Drop rows with ANY NaN
-        before = len(X)
-        combined = pd.concat([X, y], axis=1)
-        combined = combined.dropna()
-        after = len(combined)
-        X_clean = combined[X_cols]
-        y_clean = combined['Mid_Rate']
+        X = train_df[X_cols].copy()
+        y = train_df['Mid_Rate'].copy()
 
-        if after == 0:
-            st.error("No valid data after removing NaN. Check your inputs.")
+        combined = pd.concat([X, y], axis=1).dropna()
+        if len(combined) < 2:
+            st.error("Not enough valid data.")
             st.stop()
 
-        if after < before:
-            st.warning(f"Dropped {before - after} rows with missing values.")
+        X_clean, y_clean = combined[X_cols], combined['Mid_Rate']
 
-        # Train
         model = LinearRegression()
         model.fit(X_clean.values, y_clean.values)
         y_pred = model.predict(X_clean.values)
         r2 = r2_score(y_clean, y_pred)
 
-        # Equation
-        terms = [f"{c:.2f}×{f}" for c, f in zip(model.coef_, selected_features)]
+        terms = []
+        for i, name in enumerate(display_names):
+            coef = model.coef_[i]
+            if name in ['Affordable', 'Mid-Segment']:
+                terms.append(f"{coef:+.0f} if {name}")
+            else:
+                terms.append(f"{coef:.2f}×{name}")
         eq = "Rate = " + " + ".join(terms)
         eq += f" + {model.intercept_:.0f}" if model.intercept_ >= 0 else f" – {abs(model.intercept_):.0f}"
 
-        st.success(f"Model trained! R² = {r2:.4f}")
+        st.success(f"Trained on **{len(X_clean)} projects**! R² = {r2:.4f}")
         col1, col2 = st.columns(2)
         col1.metric("R²", f"{r2:.4f}")
         col2.code(eq)
 
-        # Plot
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=y_clean, y=y_pred, mode='markers',
-                                 text=combined['Project_ID'],
+                                 text=train_df.loc[y_clean.index, 'Project_ID'],
                                  hovertemplate='<b>%{text}</b><br>Actual: ₹%{x:,.0f}<br>Pred: ₹%{y:,.0f}'))
         fig.add_trace(go.Scatter(x=[y_clean.min(), y_clean.max()], y=[y_clean.min(), y_clean.max()],
                                  mode='lines', line=dict(dash='dash', color='red')))
-        fig.update_layout(title, xaxis_title="Actual", yaxis_title="Predicted", height=500)
+        fig.update_layout(title="Actual vs Predicted", xaxis_title="Actual", yaxis_title="Predicted", height=500)
         st.plotly_chart(fig, use_container_width=True)
 
-        st.session_state['model'] = {'model': model, 'features': X_cols, 'eq': eq, 'r2': r2}
+        st.session_state['model'] = {
+            'model': model,
+            'features': X_cols,
+            'display_features': selected_features,
+            'eq': eq,
+            'r2': r2
+        }
 
 # --------------------------------------------------------------
 # PREDICT NEW
@@ -294,20 +409,27 @@ with st.expander("Predict New Project"):
         st.info("Train model first.")
     else:
         inputs = {}
-        for f in st.session_state['model']['features']:
-            label = [k for k, v in feature_options.items() if v == f][0]
-            if f == 'amenity_score':
-                inputs[f] = st.slider(label, 0.0, 1.0, 0.6, 0.01)
-            elif f == 'road_numeric':
-                rd = st.selectbox(label, ['A','B','C','D'])
-                inputs[f] = {'A':1,'B':2,'C':3,'D':4}[rd]
-            elif 'fsi' in f.lower():
-                inputs[f] = st.number_input(label, 0.0, 20000.0, 2500.0)
+        for f in st.session_state['model']['display_features']:
+            if f == "Project Category":
+                cat = st.selectbox("Project Category", ["Affordable", "Mid-Segment", "Luxury"], key="pred_cat")
+                inputs['Category_Affordable'] = 1 if cat == "Affordable" else 0
+                inputs['Category_MidSegment'] = 1 if cat == "Mid-Segment" else 0
             else:
-                inputs[f] = st.number_input(label, 0.0, 50.0, 5.0)
+                col = feature_options[f]
+                if col == 'amenity_score':
+                    inputs[col] = st.slider(f, 0.0, 1.0, 0.6, 0.01, key=f"pred_{col}")
+                elif col == 'road_numeric':
+                    rd = st.selectbox(f, ['A','B','C','D'], key=f"pred_{col}")
+                    inputs[col] = {'A':1,'B':2,'C':3,'D':4}[rd]
+                elif 'fsi' in col.lower():
+                    inputs[col] = st.number_input(f, 0.0, 20000.0, 2500.0, key=f"pred_{col}")
+                else:
+                    inputs[col] = st.number_input(f, 0.0, 50.0, 5.0, key=f"pred_{col}")
 
-        if st.button("Predict"):
-            X_new = np.array([[inputs[c] for c in st.session_state['model']['features']]])
+        if st.button("Predict", type="primary"):
+            X_new = np.array([[inputs.get(c, 0) for c in st.session_state['model']['features']]])
             pred = st.session_state['model']['model'].predict(X_new)[0]
-            st.success(f"**₹{pred:,.0f}/sqft**")
+            pred_cat = categorize_rate(pred, rate_ranges)
+            st.success(f"**₹{pred:,.0f}/sqft on Salable Area**")
+            st.caption(f"**Category:** {pred_cat}")
             st.caption(st.session_state['model']['eq'])
