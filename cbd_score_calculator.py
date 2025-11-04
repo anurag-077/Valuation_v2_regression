@@ -1,14 +1,15 @@
-# cbd_score_ors.py
+# cbd_score_nearest_routes.py
 import requests
 import numpy as np
 import streamlit as st
-from typing import Dict, Optional
+import pandas as pd
+import plotly.graph_objects as go
+from typing import Dict, List, Tuple
 
 # ==============================================================
-# 1. CONFIG — GET YOUR FREE API KEY FROM:
-# https://openrouteservice.org/dev/#/signup
+# 1. OSRM PUBLIC SERVER
 # ==============================================================
-ORS_API_KEY = "your-api-key&start=8.681495,49.41461&end=8.687872,49.420318"  # ← REPLACE THIS
+OSRM_URL = "http://router.project-osrm.org/route/v1/driving/"
 
 # ==============================================================
 # 2. MASTER CBD LIST
@@ -23,160 +24,254 @@ CBD_MASTER = [
 ]
 
 # ==============================================================
-# 3. ORS DIRECTIONS API CALL
+# 3. ROAD TYPE MAPPING
 # ==============================================================
-def get_ors_route(start_lng, start_lat, end_lng, end_lat) -> Optional[Dict]:
-    url = "https://api.openrouteservice.org/v2/directions/driving-car"
-    headers = {"Authorization": ORS_API_KEY}
-    body = {
-        "coordinates": [[start_lng, start_lat], [end_lng, end_lat]],
-        "instructions": False,
-        "preference": "fastest"
-    }
-    try:
-        resp = requests.post(url, json=body, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            return resp.json()
-        else:
-            st.error(f"ORS Error {resp.status_code}: {resp.text}")
-            return None
-    except Exception as e:
-        st.error(f"Request failed: {e}")
-        return None
-
-# ==============================================================
-# 4. EXTRACT ROAD TYPE FROM ORS SEGMENTS
-# ==============================================================
-ORS_ROAD_CLASS_TO_TYPE = {
-    "motorway": "A", "motorway_link": "A",
-    "trunk": "A", "trunk_link": "A",
-    "primary": "B", "primary_link": "B",
-    "secondary": "C", "secondary_link": "C",
-    "tertiary": "C", "tertiary_link": "C",
-    "unclassified": "D", "residential": "D", "service": "D", "living_street": "D"
+OSM_TO_CATEGORY = {
+    "motorway": "D", "motorway_link": "D",
+    "trunk": "D", "trunk_link": "C",
+    "primary": "C", "primary_link": "C",
+    "secondary": "B", "secondary_link": "B",
+    "tertiary": "A",
+    "residential": "A", "unclassified": "A", "service": "A",
+    "living_street": "A", "road": "A"
 }
 
-def extract_dominant_road_type(segments):
-    if not segments:
-        return "D"
-    road_classes = []
-    total_dist = sum(s.get("distance", 0) for s in segments)
-    for seg in segments:
-        dist = seg.get("distance", 0)
-        way = seg.get("way", {})
-        road_class = way.get("road_class", "unclassified")
-        weight = dist / total_dist if total_dist > 0 else 1
-        road_classes.append((road_class, weight))
-    # Weighted vote
-    scores = {"A": 0, "B": 0, "C": 0, "D": 0}
-    for rc, w in road_classes:
-        mapped = ORS_ROAD_CLASS_TO_TYPE.get(rc, "D")
-        scores[mapped] += w
-    return max(scores, key=scores.get)
+# ==============================================================
+# 4. GET MULTIPLE ROUTES TO ONE CBD
+# ==============================================================
+def get_routes_to_cbd(start_lng, start_lat, end_lng, end_lat) -> List[Dict]:
+    url = f"{OSRM_URL}{start_lng},{start_lat};{end_lng},{end_lat}"
+    params = {
+        "overview": "full",
+        "geometries": "geojson",
+        "alternatives": "true",
+        "steps": "true"
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("routes", [])
+        else:
+            st.warning(f"OSRM Error: {resp.status_code}")
+            return []
+    except Exception as e:
+        st.error(f"Request failed: {e}")
+        return []
 
 # ==============================================================
-# 5. MAIN CBD SCORE FUNCTION (AUTO ROAD DISTANCE + TYPE)
+# 5. EXTRACT ROAD TYPE
 # ==============================================================
-def calculate_cbd_score_ors(
-    project_lat: float,
-    project_lng: float
-) -> Dict:
-    results = []
-    
-    with st.spinner("Fetching real road routes to all CBDs..."):
-        for cbd in CBD_MASTER:
-            route = get_ors_route(
-                project_lng, project_lat,
-                cbd["lng"], cbd["lat"]
-            )
-            if not route or "routes" not in route or not route["routes"]:
-                # Fallback to Haversine if ORS fails
-                from math import radians, sin, cos, sqrt, atan2
-                R = 6371
-                dlat = radians(cbd["lat"] - project_lat)
-                dlon = radians(cbd["lng"] - project_lng)
-                a = sin(dlat/2)**2 + cos(radians(project_lat)) * cos(radians(cbd["lat"])) * sin(dlon/2)**2
-                c = 2 * atan2(sqrt(a), sqrt(1-a))
-                dist_km = R * c
-                time_min = (dist_km / 30) * 60  # assume 30 km/h
-                road_type = "C"
-            else:
-                r = route["routes"][0]
-                summary = r["summary"]
-                dist_km = summary["distance"] / 1000
-                time_min = summary["duration"] / 60
-                road_type = extract_dominant_road_type(r.get("segments", []))
+def get_dominant_road_type(legs: List) -> str:
+    if not legs or not legs[0].get("steps"):
+        return "A"
+    total_dist = 0
+    weighted = {"A": 0, "B": 0, "C": 0, "D": 0}
+    for step in legs[0]["steps"]:
+        dist = step.get("distance", 0)
+        total_dist += dist
+        name = step.get("name", "").lower()
+        if "nh" in name or "express" in name:
+            cat = "D"
+        elif "road" in name or "marg" in name:
+            cat = "C"
+        elif "lane" in name or "galli" in name:
+            cat = "A"
+        else:
+            cat = "B"
+        weighted[cat] += dist
+    return max(weighted, key=weighted.get) if total_dist > 0 else "A"
 
-            # Score calculations
-            score_dist = max(0.6, 1 / (1 + dist_km / 10))
-            score_time = max(0.6, 1 / (1 + time_min / 30))
-            final_score = round(0.6 * score_dist + 0.4 * score_time, 3)
-            final_score = max(0.6, min(1.0, final_score))
+# ==============================================================
+# 6. EXTRACT COORDS
+# ==============================================================
+def extract_coords(geometry: Dict) -> List[Tuple[float, float]]:
+    if not geometry or geometry.get("type") != "LineString":
+        return []
+    return [(lat, lng) for lng, lat in geometry.get("coordinates", [])]
 
-            results.append({
-                "CBD": cbd["name"],
-                "Area": cbd["area"],
-                "Road_Distance_km": round(dist_km, 2),
-                "Travel_Time_min": round(time_min, 1),
-                "Road_Type": road_type,
-                "Score_Dist": round(score_dist, 3),
-                "Score_Time": round(score_time, 3),
-                "CBD_Score": final_score
-            })
+# ==============================================================
+# 7. SCORE FUNCTION
+# ==============================================================
+def calculate_score(dist_km: float, time_min: float) -> float:
+    score_dist = max(0.6, 1 / (1 + dist_km / 10))
+    score_time = max(0.6, 1 / (1 + time_min / 30))
+    return round(0.6 * score_dist + 0.4 * score_time, 3)
 
-    # Find best CBD
-    best = max(results, key=lambda x: x["CBD_Score"])
-    
+# ==============================================================
+# 8. MAIN: FIND NEAREST CBD + ALL ROUTES TO IT
+# ==============================================================
+@st.cache_data(show_spinner=False)
+def analyze_nearest_cbd(project_lat: float, project_lng: float) -> Dict:
+    best_cbd = None
+    best_score = 0
+    best_route_data = None
+
+    for cbd in CBD_MASTER:
+        routes = get_routes_to_cbd(project_lng, project_lat, cbd["lng"], cbd["lat"])
+        if not routes:
+            continue
+        fastest = routes[0]
+        dist_km = fastest["distance"] / 1000
+        time_min = fastest["duration"] / 60
+        score = calculate_score(dist_km, time_min)
+        if score > best_score:
+            best_score = score
+            best_cbd = cbd
+            best_route_data = fastest
+
+    if not best_cbd:
+        st.error("No route found to any CBD.")
+        return {}
+
+    # Get ALL routes to nearest CBD
+    all_routes = get_routes_to_cbd(project_lng, project_lat, best_cbd["lng"], best_cbd["lat"])
+    route_details = []
+    selected_geometry = None
+
+    for i, r in enumerate(all_routes):
+        dist_km = r["distance"] / 1000
+        time_min = r["duration"] / 60
+        road_type = get_dominant_road_type(r["legs"])
+        score = calculate_score(dist_km, time_min)
+        is_selected = (i == 0)
+        if is_selected:
+            selected_geometry = r["geometry"]
+        route_details.append({
+            "Route": f"Route {i+1}",
+            "Distance_km": round(dist_km, 2),
+            "Time_min": round(time_min, 1),
+            "Road_Type": road_type,
+            "Score": score,
+            "Is_Selected": is_selected,
+            "Geometry": r["geometry"]
+        })
+
     return {
-        "CBD_Score": best["CBD_Score"],
-        "Nearest_CBD": best["CBD"],
-        "CBD_Area": best["Area"],
-        "Road_Distance_km": best["Road_Distance_km"],
-        "Travel_Time_min": best["Travel_Time_min"],
-        "Road_Type": best["Road_Type"],
-        "All_CBDs": results,
-        "Input_Lat": project_lat,
-        "Input_Lng": project_lng
+        "Nearest_CBD": best_cbd["name"],
+        "CBD_Area": best_cbd["area"],
+        "CBD_Score": best_score,
+        "Selected_Distance_km": round(best_route_data["distance"] / 1000, 2),
+        "Selected_Time_min": round(best_route_data["duration"] / 60, 1),
+        "Selected_Road_Type": get_dominant_road_type(best_route_data["legs"]),
+        "All_Routes": route_details,
+        "Selected_Geometry": selected_geometry,
+        "Project_Lat": project_lat,
+        "Project_Lng": project_lng,
+        "CBD_Lat": best_cbd["lat"],
+        "CBD_Lng": best_cbd["lng"]
     }
 
 # ==============================================================
-# STREAMLIT DEMO
+# 9. PLOT MAP
 # ==============================================================
-def run_demo():
-    st.title("CBD Score — Real Road Distance (Auto)")
-    st.caption("Uses OpenRouteService API | No manual road type | Actual drivable path")
+def plot_routes_to_cbd(data: Dict):
+    fig = go.Figure()
 
-    if ORS_API_KEY == "YOUR_ORS_API_KEY_HERE":
-        st.error("Please set your OpenRouteService API key in the code!")
+    # Project
+    fig.add_trace(go.Scattermapbox(
+        lat=[data["Project_Lat"]], lon=[data["Project_Lng"]],
+        mode="markers", marker=dict(size=16, color="blue"),
+        name="Project", text="Your Project", hoverinfo="text"
+    ))
+
+    # Nearest CBD
+    fig.add_trace(go.Scattermapbox(
+        lat=[data["CBD_Lat"]], lon=[data["CBD_Lng"]],
+        mode="markers", marker=dict(size=16, color="orange"),
+        name="Nearest CBD", text=f"{data['Nearest_CBD']} ({data['CBD_Area']})", hoverinfo="text"
+    ))
+
+    # All routes
+    for route in data["All_Routes"]:
+        coords = extract_coords(route["Geometry"])
+        if not coords:
+            continue
+        lats, lons = zip(*coords)
+        color = "green" if route["Is_Selected"] else "red"
+        width = 6 if route["Is_Selected"] else 2
+        opacity = 1.0 if route["Is_Selected"] else 0.5
+        name = f"{route['Distance_km']} km, {route['Time_min']} min"
+        fig.add_trace(go.Scattermapbox(
+            lat=lats, lon=lons,
+            mode="lines", line=dict(width=width, color=color),
+            opacity=opacity, name=name,
+            hoverinfo="text",
+            text=f"{name} | Type: {route['Road_Type']} | Score: {route['Score']}"
+        ))
+
+    center_lat = (data["Project_Lat"] + data["CBD_Lat"]) / 2
+    center_lng = (data["Project_Lng"] + data["CBD_Lng"]) / 2
+    fig.update_layout(
+        mapbox_style="open-street-map",
+        mapbox=dict(center=dict(lat=center_lat, lon=center_lng), zoom=12),
+        margin=dict(l=0, r=0, t=50, b=0),
+        height=650,
+        title=f"All Routes to {data['Nearest_CBD']} | Green = Used for CBD Score"
+    )
+    return fig
+
+# ==============================================================
+# 10. STREAMLIT UI – SINGLE INPUT BOX
+# ==============================================================
+st.set_page_config(page_title="CBD Score - Nearest CBD Routes", layout="wide")
+st.title("CBD Score – All Routes to Nearest CBD")
+st.caption("Paste lat,lon (e.g., 18.592624745040947, 73.80011752521669)")
+
+# SINGLE INPUT BOX
+coord_input = st.text_input(
+    "Enter Latitude, Longitude",
+    placeholder="18.592624745040947, 73.80011752521669",
+    help="Paste coordinates in format: latitude, longitude"
+)
+
+if st.button("Analyze Nearest CBD", type="primary", use_container_width=True):
+    if not coord_input.strip():
+        st.error("Please enter coordinates.")
         st.stop()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        lat = st.number_input("Latitude", value=18.5204, format="%.6f")
-    with col2:
-        lng = st.number_input("Longitude", value=73.8566, format="%.6f")
+    # Parse input
+    try:
+        parts = [p.strip() for p in coord_input.split(",")]
+        if len(parts) != 2:
+            raise ValueError
+        lat = float(parts[0])
+        lng = float(parts[1])
+        if not (10 <= lat <= 35 and 60 <= lng <= 95):  # India bounds
+            raise ValueError
+    except:
+        st.error("Invalid format. Use: latitude, longitude (e.g., 18.52, 73.85)")
+        st.stop()
 
-    if st.button("Calculate CBD Score (Road Network)", type="primary"):
-        result = calculate_cbd_score_ors(lat, lng)
-        
-        st.success(f"**CBD Score = {result['CBD_Score']:.3f}**")
-        
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("Nearest CBD", f"{result['Nearest_CBD']} ({result['CBD_Area']})")
-            st.metric("Road Distance", f"{result['Road_Distance_km']} km")
-        with c2:
-            st.metric("Travel Time", f"{result['Travel_Time_min']} min")
-            st.metric("Road Type", result['Road_Type'])
+    with st.spinner("Finding nearest CBD and all routes..."):
+        result = analyze_nearest_cbd(lat, lng)
 
-        with st.expander("All CBDs (Detailed)", expanded=False):
-            df = pd.DataFrame(result["All_CBDs"])
-            st.dataframe(df, use_container_width=True)
+    if not result:
+        st.stop()
 
-        st.caption("Based on **actual road network** • 10 km or 30 min = decay midpoint")
+    # Final Score
+    st.success(f"**CBD SCORE = {result['CBD_Score']:.3f}**")
+    st.markdown(f"**Nearest CBD:** {result['Nearest_CBD']} ({result['CBD_Area']})")
+    st.markdown(f"**Selected Route:** {result['Selected_Distance_km']} km, {result['Selected_Time_min']} min, Type **{result['Selected_Road_Type']}**")
 
-# ==============================================================
-# RUN
-# ==============================================================
-if __name__ == "__main__":
-    run_demo()
+    # Map
+    st.subheader("All Routes to Nearest CBD")
+    fig = plot_routes_to_cbd(result)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Table
+    st.subheader("Route Options to Nearest CBD")
+    df = pd.DataFrame(result["All_Routes"])
+    df = df.drop(columns=["Geometry", "Is_Selected"])
+    df["Selected"] = df["Score"].apply(lambda x: "Yes" if x == result['CBD_Score'] else "")
+    df = df.sort_values("Score", ascending=False)
+    st.dataframe(
+        df.style.apply(lambda row: ['background: #d4edda' if row['Selected'] == 'Yes' else ''] * len(row), axis=1),
+        use_container_width=True
+    )
+
+    st.caption(
+        "Green route = used for CBD Score | "
+        "Only routes to nearest CBD shown | "
+        "Score: 10 km or 30 min = midpoint"
+    )

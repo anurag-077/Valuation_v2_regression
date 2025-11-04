@@ -3,12 +3,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import math
+import requests
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 import plotly.graph_objects as go
 import plotly.express as px
 from scipy.spatial import ConvexHull
 import os
+from typing import List, Dict
 
 # ==============================================================
 # CONFIG
@@ -42,7 +44,59 @@ ORDINAL_CATEGORY_MAP = {"Affordable": 1, "Mid-Segment": 2, "Luxury": 3}
 ROAD_MAP = {'A': 1, 'B': 2, 'C': 3, 'D': 4}
 
 # ==============================================================
-# UTILS
+# CBD MASTER LIST (same as cbd_score_nearest_routes.py)
+# ==============================================================
+CBD_MASTER = [
+    {"name": "Shivajinagar", "lat": 18.5305, "lng": 73.8472, "area": "Pune"},
+    {"name": "Camp", "lat": 18.5127, "lng": 73.8795, "area": "Pune"},
+    {"name": "Koregaon Park", "lat": 18.5377, "lng": 73.8855, "area": "Pune"},
+    {"name": "Pimpri", "lat": 18.6275, "lng": 73.8060, "area": "PCMC"},
+    {"name": "Akurdi", "lat": 18.6427, "lng": 73.7585, "area": "PCMC"},
+    {"name": "Chinchwad", "lat": 18.6297, "lng": 73.7850, "area": "PCMC"},
+]
+
+OSRM_URL = "http://router.project-osrm.org/route/v1/driving/"
+
+# ==============================================================
+# CBD SCORE HELPERS (exact copy of the logic in the reference file)
+# ==============================================================
+def get_fastest_route(start_lng, start_lat, end_lng, end_lat) -> Dict:
+    """Return the fastest OSRM route (or empty dict on error)."""
+    url = f"{OSRM_URL}{start_lng},{start_lat};{end_lng},{end_lat}"
+    params = {"overview": "false", "alternatives": "false", "steps": "false"}
+    try:
+        r = requests.get(url, params=params, timeout=12)
+        if r.status_code == 200:
+            data = r.json()
+            routes = data.get("routes", [])
+            return routes[0] if routes else {}
+    except Exception:
+        pass
+    return {}
+
+def calculate_cbd_score(dist_km: float, time_min: float) -> float:
+    """Same formula as in cbd_score_nearest_routes.py."""
+    score_dist = max(0.6, 1 / (1 + dist_km / 10))
+    score_time = max(0.6, 1 / (1 + time_min / 30))
+    return round(0.6 * score_dist + 0.4 * score_time, 3)
+
+@st.cache_data(show_spinner=False)
+def cbd_score_for_project(lat: float, lng: float) -> float:
+    """Fastest route to the best CBD → final score."""
+    best = 0.0
+    for cbd in CBD_MASTER:
+        route = get_fastest_route(lng, lat, cbd["lng"], cbd["lat"])
+        if not route:
+            continue
+        dist_km = route["distance"] / 1000
+        time_min = route["duration"] / 60
+        score = calculate_cbd_score(dist_km, time_min)
+        if score > best:
+            best = score
+    return best
+
+# ==============================================================
+# UTILS (amenity, haversine, etc.)
 # ==============================================================
 def haversine_vectorized(lat1, lon1, lats2, lons2):
     lat1, lon1, lats2, lons2 = map(np.radians, [lat1, lon1, lats2, lons2])
@@ -114,7 +168,6 @@ def plot_selected_cluster_map(df, cluster_col, cluster_val):
         st.warning(f"No projects in {cluster_col} = {cluster_val}")
         return None
 
-    # Hover text
     if 'Village' in filtered.columns:
         filtered['hover_text'] = filtered.apply(
             lambda r: f"<b>{r['Project_Name']}</b><br>₹{r['Mid_Rate']:.0f}/sqft<br>{r['Village']}", axis=1
@@ -137,7 +190,6 @@ def plot_selected_cluster_map(df, cluster_col, cluster_val):
     )
     fig.update_traces(marker=dict(size=16, opacity=0.9))
 
-    # Convex hull
     points = filtered[['project_lng', 'project_lat']].values
     if len(points) >= 3:
         try:
@@ -267,7 +319,8 @@ with st.sidebar:
         "Road Category": "road_numeric",
         "Total FSI": "total fsi (sqmtr)",
         "Age": "Age_Of_The_Building_Till_11thOct2025",
-        "Project Category (Ordinal)": "Category_Ordinal"
+        "Project Category (Ordinal)": "Category_Ordinal",
+        "CBD Score": "cbd_score"                     # NEW FEATURE
     }
     selected_features = st.multiselect(
         "Select features", list(feature_options.keys()),
@@ -323,6 +376,21 @@ else:
 
 cluster_df['road_numeric'] = cluster_df['Road_Category'].map(ROAD_MAP).fillna(2)
 
+# --------------------- CBD SCORE CALCULATION ---------------------
+cbd_cache_key = f"cbd_{cluster_key}"
+if cbd_cache_key not in st.session_state:
+    with st.spinner("Calculating CBD scores for every project…"):
+        cbd_scores = [
+            cbd_score_for_project(row['project_lat'], row['project_lng'])
+            for _, row in cluster_df.iterrows()
+        ]
+        cluster_df['cbd_score'] = cbd_scores
+        st.session_state[cbd_cache_key] = True
+else:
+    # ensure column exists even if cached
+    if 'cbd_score' not in cluster_df.columns:
+        cluster_df['cbd_score'] = 0.0
+
 # --------------------- MAP (FIRST) ---------------------
 st.markdown("---")
 st.subheader(f"Map – Cluster **{selected_cluster}**")
@@ -332,7 +400,7 @@ if map_fig:
 else:
     st.info("Map not available for this cluster.")
 
-# --------------------- DISPLAY / EDIT TABLE ---------------------
+# --------------------- DISPLAY / EDIT TABLE (now with CBD Score) ---------------------
 def build_display_df(df, ranges):
     df = df.copy()
     df['Rate_on_Salable'] = pd.to_numeric(df['Mid_Rate'], errors='coerce').fillna(0)
@@ -340,14 +408,16 @@ def build_display_df(df, ranges):
     df['Category_Ordinal'] = df['Category'].map(ORDINAL_CATEGORY_MAP).fillna(3)
 
     df['amenity_display'] = pd.to_numeric(df['amenity_score'], errors='coerce').fillna(0).apply(lambda x: f"{x:.3f}")
+    df['cbd_display'] = df['cbd_score'].apply(lambda x: f"{x:.3f}")
 
     disp = df[[
         'Project_ID', 'Project_Name', 'Rate_on_Salable', 'Road_Category',
-        'amenity_display', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025', 'Category'
+        'amenity_display', 'cbd_display', 'total fsi (sqmtr)',
+        'Age_Of_The_Building_Till_11thOct2025', 'Category'
     ]].copy()
     disp.columns = [
         'Project ID', 'Project Name', 'Rate (₹/sqft)', 'Road Type',
-        'Amenity Score', 'Total FSI', 'Age (Years)', 'Category'
+        'Amenity Score', 'CBD Score', 'Total FSI', 'Age (Years)', 'Category'
     ]
     disp.insert(0, 'Select', disp.index.isin(st.session_state.get(f"selected_{cluster_key}", [])))
     return disp
@@ -370,7 +440,7 @@ with b3:
     if st.button("Refresh View", use_container_width=True):
         st.rerun()
 
-# Editable table
+# Editable table (CBD Score is read-only)
 edited_df = st.data_editor(
     display_df,
     num_rows="dynamic",
@@ -380,9 +450,10 @@ edited_df = st.data_editor(
             help="Check to include in training"),
         "Project ID": st.column_config.TextColumn(disabled=True, width="small"),
         "Project Name": st.column_config.TextColumn(disabled=True, width="medium"),
-        "Rate on Salable Area (₹/sqft)": st.column_config.NumberColumn(format="₹%.0f", width="small"),
+        "Rate (₹/sqft)": st.column_config.NumberColumn(format="₹%.0f", width="small"),
         "Road Type": st.column_config.SelectboxColumn(options=['A','B','C','D'], width="small"),
         "Amenity Score": st.column_config.TextColumn(disabled=True, width="small"),
+        "CBD Score": st.column_config.TextColumn(disabled=True, width="small"),
         "Total FSI": st.column_config.NumberColumn(format="%.0f", width="small"),
         "Age (Years)": st.column_config.NumberColumn(format="%.1f", width="small"),
         "Category": st.column_config.TextColumn(disabled=True, width="small")
@@ -410,7 +481,7 @@ train_df = cluster_df.loc[st.session_state[f"selected_{cluster_key}"]].copy()
 
 st.caption("Edits sync instantly. Use bulk buttons for faster selection.")
 
-# --------------------- SELECTED PROJECTS SUMMARY ---------------------
+# --------------------- SELECTED PROJECTS SUMMARY (now with CBD) ---------------------
 if train_df.empty:
     st.warning("No rows selected – check the **Select** column to include projects.")
 else:
@@ -429,6 +500,8 @@ else:
                 summary["Age (Years)"] = train_df["Age_Of_The_Building_Till_11thOct2025"]
             elif f == "Project Category (Ordinal)":
                 summary["Category (Ordinal)"] = train_df["Category_Ordinal"]
+            elif f == "CBD Score":
+                summary["CBD Score"] = train_df["cbd_score"].round(3)
         summary["Category"] = summary["Rate (₹/sqft)"].apply(lambda x: categorize_rate(x, rate_ranges))
         base = ['Project ID', 'Project Name', 'Rate (₹/sqft)']
         feat_cols = [c for c in summary.columns if c not in base + ["Category"]]
@@ -451,6 +524,9 @@ if st.button("Train Model on Selected Rows", type="primary", use_container_width
             if f == "Project Category (Ordinal)":
                 X_cols.append("Category_Ordinal")
                 disp_names.append("Category (1=Aff,2=Mid,3=Lux)")
+            elif f == "CBD Score":
+                X_cols.append("cbd_score")
+                disp_names.append("CBD Score")
             else:
                 X_cols.append(feature_options[f])
                 disp_names.append(f)
@@ -510,6 +586,9 @@ else:
         if f == "Project Category (Ordinal)":
             cat = st.selectbox("Project Category", ["Affordable", "Mid-Segment", "Luxury"], key="pred_cat_ord")
             inputs["Category_Ordinal"] = ORDINAL_CATEGORY_MAP[cat]
+        elif f == "CBD Score":
+            # User can slide a realistic range (0.0 – 1.0)
+            inputs["cbd_score"] = st.slider("CBD Score", 0.0, 1.0, 0.7, 0.01, key="pred_cbd")
         else:
             col = feature_options[f]
             if col == 'amenity_score':
