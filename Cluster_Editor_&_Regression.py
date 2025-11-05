@@ -12,6 +12,7 @@ import os
 from typing import List, Dict
 import logging
 from road_identifier import identify_road
+from sklearn.preprocessing import StandardScaler
 
 # ==============================================================
 # PAGE CONFIG & PROFESSIONAL STYLING
@@ -163,8 +164,8 @@ def get_fastest_route(start_lng, start_lat, end_lng, end_lat) -> Dict:
     return {}
 
 def calculate_cbd_score(dist_km: float, time_min: float) -> float:
-    score_dist = max(0.6, 1 / (1 + dist_km / 10))
-    score_time = max(0.6, 1 / (1 + time_min / 30))
+    score_dist = 1 / (1 + dist_km / 10)
+    score_time = 1 / (1 + time_min / 30)
     return round(0.6 * score_dist + 0.4 * score_time, 3)
 
 @st.cache_data(show_spinner=False)
@@ -442,7 +443,7 @@ st.session_state[cluster_key] = cluster_df
 st.session_state[f"selected_{cluster_key}"] = edited_df[edited_df['Select']].index.tolist()
 train_df = cluster_df.loc[st.session_state[f"selected_{cluster_key}"]].copy()
 
-# --- 5. Train Model ---
+# --- 5. Train Regression Model ---
 st.markdown("<div class='subsection'>5. Train Regression Model</div>", unsafe_allow_html=True)
 if st.button("Train Model", type="primary", use_container_width=True):
     if not selected_features: st.error("Select features.")
