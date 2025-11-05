@@ -557,6 +557,7 @@ if st.button("Train Model", type="primary", use_container_width=True):
             
 # --- 6. Predict Subject Rate ---
 st.markdown("<div class='subsection'>6. Predict Subject Rate</div>", unsafe_allow_html=True)
+
 if "model" not in st.session_state:
     st.info("Train a model to enable prediction.")
 else:
@@ -605,7 +606,9 @@ else:
                 )
                 inputs[col] = val
 
+    # ------------------------------------------------------------------
     # COMPUTE & PREDICT BUTTON
+    # ------------------------------------------------------------------
     if st.button("Compute & Predict", type="primary", use_container_width=True):
         st.session_state.run_id += 1
         run_id = st.session_state.run_id
@@ -615,23 +618,23 @@ else:
             st.stop()
 
         with st.spinner("Analyzing location..."):
+            # --------------------------------------------------------------
             # 1. Amenity Score
+            # --------------------------------------------------------------
             amenity = 0.0
-            amenity_df = pd.DataFrame(columns=["Amenity Name", "Type", "Category", "Distance (m)", "Influence Factor f(d)"])
+            amenity_df = pd.DataFrame(columns=["Amenity Name","Type","Category","Distance (m)","Influence Factor f(d)"])
             if not all_amenities.empty:
                 amenity = compute_amenity_score(subject_lat, subject_lng, all_amenities, active_weights)
 
                 amenity_rows = []
                 for cat, w in active_weights.items():
-                    if cat not in all_amenities["category"].values: 
-                        continue
+                    if cat not in all_amenities["category"].values: continue
                     cat_df = all_amenities[all_amenities["category"] == cat]
-                    if cat_df.empty: 
-                        continue
-                    dists = haversine_vectorized(subject_lat, subject_lng, cat_df["lat"].values, cat_df["lng"].values)
+                    if cat_df.empty: continue
+                    dists = haversine_vectorized(subject_lat, subject_lng,
+                                                cat_df["lat"].values, cat_df["lng"].values)
                     mask = dists <= POI_SEARCH_RADIUS_M
-                    if not mask.any(): 
-                        continue
+                    if not mask.any(): continue
                     for d, row in zip(dists[mask], cat_df[mask].itertuples()):
                         influence = decay(d)
                         name = getattr(row, 'amenity_name', "Unnamed")
@@ -644,15 +647,45 @@ else:
                         })
                 amenity_df = pd.DataFrame(amenity_rows).sort_values("Distance (m)").reset_index(drop=True) if amenity_rows else amenity_df
 
-            # 2. CBD Score
-            cbd = cbd_score_for_project(subject_lat, subject_lng)
+            # --------------------------------------------------------------
+            # 2. CBD Score – **keep full details of the best CBD**
+            # --------------------------------------------------------------
+            best_cbd = None
+            best_score = 0.0
+            cbd_details = []                     # <-- NEW: collect all CBDs
+            for cbd in CBD_MASTER:
+                route = get_fastest_route(subject_lng, subject_lat, cbd["lng"], cbd["lat"])
+                if not route: continue
+                dist_km  = route["distance"] / 1000
+                time_min = route["duration"] / 60
+                score = calculate_cbd_score(dist_km, time_min)
 
+                cbd_details.append({
+                    "CBD Name": cbd["name"],
+                    "Area": cbd["area"],
+                    "Distance (km)": round(dist_km, 2),
+                    "Time (min)": round(time_min, 1),
+                    "Score": round(score, 3)
+                })
+
+                if score > best_score:
+                    best_score = score
+                    best_cbd = cbd
+                    best_dist_km = dist_km
+                    best_time_min = time_min
+
+            cbd = best_score
+
+            # --------------------------------------------------------------
             # 3. Road Detection
+            # --------------------------------------------------------------
             roads_all, nearest_road = identify_road(subject_lat, subject_lng)
             road_cat = nearest_road.get("category", "B")
             road_num = ROAD_MAP.get(road_cat, 2)
 
+            # --------------------------------------------------------------
             # 4. Build feature vector
+            # --------------------------------------------------------------
             vec = {
                 "amenity_score": amenity,
                 "cbd_score": cbd,
@@ -664,11 +697,13 @@ else:
             pred_rate = model_info["model"].predict([X_sub])[0]
             pred_cat = categorize_rate(pred_rate, rate_ranges)
 
+        # --------------------------------------------------------------
         # UPDATE COMPUTED FIELDS
+        # --------------------------------------------------------------
         computed_vals = {
             "amenity_score": round(amenity, 3),
             "cbd_score": round(cbd, 3),
-            "road_numeric": road_cat  # Display category, not numeric
+            "road_numeric": road_cat
         }
         for col, val in computed_vals.items():
             if col in phs:
@@ -679,12 +714,16 @@ else:
                     key=f"done_{col}_{run_id}"
                 )
 
+        # --------------------------------------------------------------
         # DISPLAY RESULTS
+        # --------------------------------------------------------------
         st.success(f"**Predicted Rate: ₹{pred_rate:,.0f}/sqft on Salable Area**")
         st.caption(f"**Market Segment:** {pred_cat}")
         st.code(model_info["eq"], language="latex")
 
+        # --------------------------------------------------------------
         # SUBJECT ATTRIBUTES TABLE
+        # --------------------------------------------------------------
         st.markdown("#### Subject Location Attributes")
         attr_rows = []
         display_map = {
@@ -702,15 +741,43 @@ else:
                 pd.DataFrame(attr_rows),
                 use_container_width=True,
                 hide_index=True,
-                column_config={
-                    "Attribute": st.column_config.TextColumn(width="medium"),
-                    "Value": st.column_config.TextColumn(width="small")
-                }
+                column_config={"Attribute": st.column_config.TextColumn(width="medium"),
+                               "Value": st.column_config.TextColumn(width="small")}
             )
         else:
             st.info("No model features to display.")
 
+        # --------------------------------------------------------------
+        # CBD DETAILS TABLE (NEW)
+        # --------------------------------------------------------------
+        st.markdown("#### CBD Score Calculation")
+        if cbd_details:
+            cbd_df = pd.DataFrame(cbd_details)
+            # Highlight the best CBD
+            best_idx = cbd_df["Score"].idxmax()
+            st.dataframe(
+                cbd_df.style.apply(
+                    lambda row: ["background: #fff3cd" if row.name == best_idx else "" for _ in row],
+                    axis=1
+                ).format({
+                    "Distance (km)": "{:.2f}",
+                    "Time (min)": "{:.1f}",
+                    "Score": "{:.3f}"
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+            best_row = cbd_df.loc[best_idx]
+            st.caption(
+                f"**Best CBD:** {best_row['CBD Name']} ({best_row['Area']}) – "
+                f"{best_row['Distance (km)']:,} km, {best_row['Time (min)']:,} min → **Score: {best_row['Score']:.3f}**"
+            )
+        else:
+            st.info("No CBD routes found.")
+
+        # --------------------------------------------------------------
         # AMENITY TABLE
+        # --------------------------------------------------------------
         st.markdown("#### Amenities within 1 km")
         if not amenity_df.empty:
             st.dataframe(
@@ -725,14 +792,17 @@ else:
         else:
             st.info("No amenities found within 1 km.")
 
+        # --------------------------------------------------------------
         # ROAD TABLE
+        # --------------------------------------------------------------
         st.markdown("#### Nearby Highways (≤ 200 m)")
         road_records = [
-            {"Road Name": r["name"], "Highway Type": r["highway"], "Category": r["category"], "Distance (m)": round(r["distance_m"], 1)}
+            {"Road Name": r["name"], "Highway Type": r["highway"], "Category": r["category"],
+             "Distance (m)": round(r["distance_m"], 1)}
             for r in roads_all if r["distance_m"] <= 200
         ]
         road_df = pd.DataFrame(road_records).sort_values("Distance (m)").reset_index(drop=True) if road_records else pd.DataFrame(
-            columns=["Road Name", "Highway Type", "Category", "Distance (m)"]
+            columns=["Road Name","Highway Type","Category","Distance (m)"]
         )
         if not road_df.empty:
             st.dataframe(
