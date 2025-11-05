@@ -305,10 +305,12 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Model Features")
     feature_options = {
-        "Amenity Score": "amenity_score", "Road Category": "road_numeric",
-        "Total FSI": "total fsi (sqmtr)", "Age": "Age_Of_The_Building_Till_11thOct2025",
-        "CBD Score": "cbd_score"
-    }
+    "Amenity Score": "amenity_score",
+    "Road Category": "road_numeric",
+    "Total FSI": "total fsi (sqmtr)",
+    "Age": "Age_Of_The_Building_Till_11thOct2025",
+    "CBD Score": "cbd_score"
+}
     selected_features = st.multiselect("Predictors", list(feature_options.keys()), default=["Amenity Score", "Road Category"], key="feat_sel")
 
 
@@ -445,35 +447,114 @@ train_df = cluster_df.loc[st.session_state[f"selected_{cluster_key}"]].copy()
 
 # --- 5. Train Regression Model ---
 st.markdown("<div class='subsection'>5. Train Regression Model</div>", unsafe_allow_html=True)
-if st.button("Train Model", type="primary", use_container_width=True):
-    if not selected_features: st.error("Select features.")
-    elif len(train_df) < 2: st.error("Need ≥2 projects.")
-    else:
-        X_cols = [feature_options[f] for f in selected_features]
-        X, y = train_df[X_cols], train_df['Mid_Rate']
-        combined = pd.concat([X, y], axis=1).dropna()
-        if len(combined) < 2: st.error("Insufficient data.")
-        else:
-            model = LinearRegression().fit(combined[X_cols], combined['Mid_Rate'])
-            pred = model.predict(combined[X_cols])
-            r2 = r2_score(combined['Mid_Rate'], pred)
-            eq = "Rate = " + " + ".join([f"{c:.2f}×{n}" for c, n in zip(model.coef_, selected_features)])
-            eq += f" + {model.intercept_:.0f}" if model.intercept_ >= 0 else f" – {abs(model.intercept_):.0f}"
-            st.session_state['model'] = {'model': model, 'features': X_cols, 'eq': eq, 'r2': r2, 'display': selected_features}
-            st.success(f"Trained on {len(combined)} projects | R² = {r2:.4f}")
-            c1, c2 = st.columns(2)
-            c1.metric("R² Score", f"{r2:.4f}")
-            c2.code(eq)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=combined['Mid_Rate'], y=pred, mode='markers',
-                                     text=train_df.loc[combined.index, 'Project_ID'],
-                                     hovertemplate='<b>%{text}</b><br>Actual: ₹%{x:,.0f}<br>Pred: ₹%{y:,.0f}'))
-            fig.add_trace(go.Scatter(x=[combined['Mid_Rate'].min(), combined['Mid_Rate'].max()],
-                                     y=[combined['Mid_Rate'].min(), combined['Mid_Rate'].max()],
-                                     mode='lines', line=dict(dash='dash', color='red')))
-            fig.update_layout(title="Actual vs Predicted", xaxis_title="Actual", yaxis_title="Predicted", height=500)
-            st.plotly_chart(fig, use_container_width=True)
 
+if st.button("Train Model", type="primary", use_container_width=True):
+    if not selected_features:
+        st.error("Select at least one predictor.")
+    elif len(train_df) < 2:
+        st.error("Need ≥2 projects to train.")
+    else:
+        # ------------------------------------------------------------------
+        # 1. Build X / y – keep **only rows that have ALL selected features**
+        # ------------------------------------------------------------------
+        X_cols = [feature_options[f] for f in selected_features]   # e.g. ['amenity_score','road_numeric',...]
+        X_raw  = train_df[X_cols].copy()
+        y      = train_df['Mid_Rate'].copy()
+
+        combined = pd.concat([X_raw, y], axis=1).dropna()
+        if len(combined) < 2:
+            st.error("Not enough complete rows after dropping NaNs.")
+            st.stop()
+
+        X = combined[X_cols]
+        y = combined['Mid_Rate']
+
+        # ------------------------------------------------------------------
+        # 2. **NO NORMALISATION** – feed raw data directly to the model
+        # ------------------------------------------------------------------
+        model = LinearRegression()
+        model.fit(X, y)
+
+        pred = model.predict(X)
+        r2   = r2_score(y, pred)
+
+        # ------------------------------------------------------------------
+        # 3. Build readable equation (coefficients are already on original scale)
+        # ------------------------------------------------------------------
+        eq_parts = [f"{c:.2f}×{n}" for c, n in zip(model.coef_, selected_features)]
+        eq = "Rate = " + " + ".join(eq_parts)
+        eq += f" + {model.intercept_:.0f}" if model.intercept_ >= 0 else f" – {abs(model.intercept_):.0f}"
+
+        # ------------------------------------------------------------------
+        # 4. Store model + indices of rows that were actually used
+        # ------------------------------------------------------------------
+        st.session_state['model'] = {
+            'model'            : model,
+            'features'         : X_cols,
+            'display_features' : selected_features,
+            'eq'               : eq,
+            'r2'               : r2,
+            'train_idx'        : X.index.tolist()          # <-- only these rows
+        }
+
+        # ------------------------------------------------------------------
+        # 5. UI – success + metrics + plot
+        # ------------------------------------------------------------------
+        st.success(f"Trained on **{len(combined)}** projects | R² = {r2:.4f}")
+        c1, c2 = st.columns(2)
+        c1.metric("R² Score", f"{r2:.4f}")
+        c2.code(eq)
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=y, y=pred, mode='markers',
+            text=train_df.loc[X.index, 'Project_ID'],
+            hovertemplate='<b>%{text}</b><br>Actual: ₹%{x:,.0f}<br>Pred: ₹%{y:,.0f}'
+        ))
+        fig.add_trace(go.Scatter(
+            x=[y.min(), y.max()], y=[y.min(), y.max()],
+            mode='lines', line=dict(dash='dash', color='red')
+        ))
+        fig.update_layout(
+            title="Actual vs Predicted (training data)",
+            xaxis_title="Actual Rate", yaxis_title="Predicted Rate",
+            height=500
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ------------------------------------------------------------------
+        # 6. **Toggle Table** – *only* the projects that were used for training
+        # ------------------------------------------------------------------
+        with st.expander("Training Projects (strictly used for model)", expanded=False):
+            train_used = train_df.loc[X.index].copy()
+
+            # Show only the columns that were actually fed to the model
+            cols_to_show = ['Project_ID', 'Project_Name', 'Mid_Rate'] + X_cols
+            train_used = train_used[cols_to_show]
+
+            # Human-readable column names
+            rename_map = {
+                'Project_ID' : 'ID',
+                'Project_Name': 'Project',
+                'Mid_Rate'   : 'Rate (₹/sqft)'
+            }
+            display_to_col = {v: k for k, v in feature_options.items()}
+            for col in X_cols:
+                rename_map[col] = display_to_col.get(col, col.replace('_', ' ').title())
+            train_used.rename(columns=rename_map, inplace=True)
+
+            # Formatting
+            fmt_dict = {c: "{:,.0f}" for c in train_used.columns if "Rate" in c}
+            fmt_dict.update({c: "{:.3f}" for c in train_used.columns if c in ["Amenity Score", "CBD Score"]})
+            fmt_dict.update({c: "{:.1f}" for c in train_used.columns if "Age" in c})
+
+            st.dataframe(
+                train_used.style.format(fmt_dict),
+                use_container_width=True,
+                hide_index=True
+            )
+            st.caption(f"**{len(train_used)}** projects were *actually* used (rows with any missing feature were dropped).")
+            
 # --- 6. Predict Subject Rate ---
 st.markdown("<div class='subsection'>6. Predict Subject Rate</div>", unsafe_allow_html=True)
 if "model" not in st.session_state:
