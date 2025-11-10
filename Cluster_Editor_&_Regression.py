@@ -304,13 +304,50 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Model Features")
-    feature_options = {
-    "Amenity Score": "amenity_score",
-    "Road Category": "road_numeric",
-    "Total FSI": "total fsi (sqmtr)",
-    "Age": "Age_Of_The_Building_Till_11thOct2025",
-    "CBD Score": "cbd_score"
-}
+
+    # Base feature options (display name -> column name)
+    BASE_FEATURE_OPTIONS = {
+        "Amenity Score": "amenity_score",
+        "Road Category": "road_numeric",
+        "Total FSI": "total fsi (sqmtr)",
+        "Age": "Age_Of_The_Building_Till_11thOct2025",
+        "CBD Score": "cbd_score"
+    }
+
+    # Initialize custom attributes store
+    if 'custom_attributes' not in st.session_state:
+        # list of dicts: {"display": "My Attr", "col": "my_attr"}
+        st.session_state.custom_attributes = []
+
+    st.caption("Add numeric, project-level attributes that should be available as predictors.")
+    with st.expander("Add custom numeric attribute", expanded=False):
+        st.markdown("Enter a short attribute name (will be used as column header). Only numeric values are supported.")
+        new_attr_name = st.text_input("Attribute name (e.g. 'Carpet Area')", key="new_attr_name")
+        new_attr_default = st.number_input("Default numeric value for new attribute", value=0.0, step=1.0, key="new_attr_default")
+        if st.button("Add Attribute", key="add_custom_attr"):
+            name = new_attr_name.strip()
+            if not name:
+                st.error("Enter a non-empty attribute name.")
+            else:
+                # sanitize to column name
+                col = name.lower().replace(' ', '_')
+                exists = any(a['col'] == col for a in st.session_state.custom_attributes) or col in BASE_FEATURE_OPTIONS.values()
+                if exists:
+                    st.error("Attribute already exists.")
+                else:
+                    st.session_state.custom_attributes.append({"display": name, "col": col})
+                    # add column to master project_df and current cluster if missing
+                    if col not in project_df.columns:
+                        project_df[col] = new_attr_default
+                    # ensure cluster_df will also have it when (re)loaded below
+                    st.success(f"Added attribute '{name}'. Enter numeric values in the table for each project.")
+
+    # Build full feature option map by merging base + custom attributes
+    feature_options = BASE_FEATURE_OPTIONS.copy()
+    for a in st.session_state.custom_attributes:
+        feature_options[a['display']] = a['col']
+
+    # Pre-select amenity + road by default; custom ones appear in the list
     selected_features = st.multiselect("Predictors", list(feature_options.keys()), default=["Amenity Score", "Road Category"], key="feat_sel")
 
 
@@ -373,6 +410,18 @@ if cluster_key not in st.session_state:
 else:
     cluster_df = st.session_state[cluster_key]
 
+# Ensure any custom attributes exist on cluster_df (keep order consistent with project_df subset)
+if 'custom_attributes' in st.session_state and st.session_state.custom_attributes:
+    for a in st.session_state.custom_attributes:
+        col = a['col']
+        if col not in cluster_df.columns:
+            if col in project_df.columns:
+                vals = project_df[project_df[cluster_type] == selected_cluster].reset_index(drop=True)[col]
+                cluster_df[col] = vals.values if len(vals) == len(cluster_df) else 0.0
+            else:
+                cluster_df[col] = 0.0
+    st.session_state[cluster_key] = cluster_df
+
 # Recalculate amenity scores
 recalc_key = f"recalc_{cluster_key}"
 if st.session_state.get("weights_applied") and not all_amenities.empty and recalc_key not in st.session_state:
@@ -412,33 +461,93 @@ def build_display_df(df, ranges):
     df['Category'] = df['Rate_on_Salable'].apply(lambda x: categorize_rate(x, ranges))
     df['amenity_display'] = df['amenity_score'].apply(lambda x: f"{x:.3f}")
     df['cbd_display'] = df['cbd_score'].apply(lambda x: f"{x:.3f}")
-    disp = df[['Project_ID', 'Project_Name', 'Rate_on_Salable', 'Road_Category', 'amenity_display', 'cbd_display', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025', 'Category']].copy()
-    disp.columns = ['ID', 'Project', 'Rate (₹/sqft)', 'Road', 'Amenity', 'CBD', 'FSI', 'Age', 'Segment']
+    core = df[['Project_ID', 'Project_Name', 'Rate_on_Salable', 'Road_Category', 'amenity_display', 'cbd_display', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025', 'Category']].copy()
+    core.columns = ['ID', 'Project', 'Rate (₹/sqft)', 'Road', 'Amenity', 'CBD', 'FSI', 'Age', 'Segment']
+
+    # Append custom attributes (numeric) if present
+    custom_cols = []
+    for a in st.session_state.get('custom_attributes', []):
+        col = a['col']
+        disp_name = a['display']
+        if col in df.columns:
+            core[disp_name] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            custom_cols.append(disp_name)
+
+    disp = core
     disp.insert(0, 'Select', disp.index.isin(st.session_state.get(f"selected_{cluster_key}", [])))
     return disp
 
 display_df = build_display_df(cluster_df, rate_ranges)
+
+# Selection helper — when user asks to "Select All" we only select rows that have NO NaNs for the currently selected predictors
+def select_all_projects():
+    feats = st.session_state.get('feat_sel', [])
+    # map display names -> internal column names
+    feat_map = {k: v for k, v in feature_options.items()} if 'feature_options' in locals() or 'feature_options' in globals() else {k: v for k, v in BASE_FEATURE_OPTIONS.items()}
+    cols = [feat_map.get(f) for f in feats if feat_map.get(f)]
+    if not cols:
+        # fallback: select all
+        st.session_state.update({f"selected_{cluster_key}": list(range(len(cluster_df)))})
+        return
+    # Build mask of rows without nulls in any of the required cols
+    subset = cluster_df.copy()
+    # If cols include display names (custom), map them back to actual columns
+    actual_cols = []
+    for c in cols:
+        # if the col name appears as a display header (custom), it will be present in display_df
+        if c in subset.columns:
+            actual_cols.append(c)
+        else:
+            # maybe custom: try to find matching custom attribute
+            for a in st.session_state.get('custom_attributes', []):
+                if a['col'] == c:
+                    actual_cols.append(a['col'])
+                    break
+    if not actual_cols:
+        st.session_state.update({f"selected_{cluster_key}": list(range(len(cluster_df)))})
+        return
+    mask = subset[actual_cols].notna().all(axis=1)
+    ok_idx = mask[mask].index.tolist()
+    excluded = len(cluster_df) - len(ok_idx)
+    st.session_state.update({f"selected_{cluster_key}": ok_idx})
+    if excluded > 0:
+        st.warning(f"{excluded} project(s) not selected because they have missing values for the chosen predictors. Please fill numeric values in the table and try again.")
+
 b1, b2, b3 = st.columns(3)
-with b1: st.button("Select All", use_container_width=True, on_click=lambda: st.session_state.update({f"selected_{cluster_key}": list(range(len(cluster_df)))}), key="sel_all")
+with b1: st.button("Select All", use_container_width=True, on_click=select_all_projects, key="sel_all")
 with b2: st.button("Clear", use_container_width=True, on_click=lambda: st.session_state.update({f"selected_{cluster_key}": []}), key="sel_clear")
 with b3: st.button("Refresh", use_container_width=True, on_click=st.rerun, key="refresh")
 
+# Build column_config dynamically so custom numeric attributes are NumberColumns
+col_config = {
+    "Select": st.column_config.CheckboxColumn("Select"),
+    "ID": st.column_config.TextColumn(disabled=True),
+    "Project": st.column_config.TextColumn(disabled=True),
+    "Rate (₹/sqft)": st.column_config.NumberColumn(format="₹%.0f"),
+    "Road": st.column_config.SelectboxColumn(options=['A','B','C','D']),
+    "Amenity": st.column_config.TextColumn(disabled=True),
+    "CBD": st.column_config.TextColumn(disabled=True),
+    "FSI": st.column_config.NumberColumn(format="%.0f"),
+    "Age": st.column_config.NumberColumn(format="%.1f"),
+    "Segment": st.column_config.TextColumn(disabled=True)
+}
+# Add custom numeric attributes to the editor config
+for a in st.session_state.get('custom_attributes', []):
+    disp = a['display']
+    col_config[disp] = st.column_config.NumberColumn(format="%.2f")
+
 edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=True,
-    column_config={
-        "Select": st.column_config.CheckboxColumn("Select"),
-        "ID": st.column_config.TextColumn(disabled=True),
-        "Project": st.column_config.TextColumn(disabled=True),
-        "Rate (₹/sqft)": st.column_config.NumberColumn(format="₹%.0f"),
-        "Road": st.column_config.SelectboxColumn(options=['A','B','C','D']),
-        "Amenity": st.column_config.TextColumn(disabled=True),
-        "CBD": st.column_config.TextColumn(disabled=True),
-        "FSI": st.column_config.NumberColumn(format="%.0f"),
-        "Age": st.column_config.NumberColumn(format="%.1f"),
-        "Segment": st.column_config.TextColumn(disabled=True)
-    }, hide_index=True, key=f"editor_{cluster_key}")
+    column_config=col_config, hide_index=True, key=f"editor_{cluster_key}")
 
 # Save edits
 cluster_df.loc[edited_df.index, ['Rate_on_Salable', 'Road_Category', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025']] = edited_df[['Rate (₹/sqft)', 'Road', 'FSI', 'Age']].values
+# Persist custom attribute edits back to cluster_df
+for a in st.session_state.get('custom_attributes', []):
+    disp = a['display']
+    col = a['col']
+    if disp in edited_df.columns:
+        # coerce to numeric
+        cluster_df.loc[edited_df.index, col] = pd.to_numeric(edited_df[disp].values, errors='coerce')
 cluster_df['road_numeric'] = cluster_df['Road_Category'].map(ROAD_MAP).fillna(2)
 cluster_df['Mid_Rate'] = cluster_df['Rate_on_Salable']
 st.session_state[cluster_key] = cluster_df
@@ -452,59 +561,93 @@ if st.button("Train Model", type="primary", use_container_width=True):
     if not selected_features:
         st.error("Select at least one predictor.")
     elif len(train_df) < 2:
-        st.error("Need ≥2 projects to train.")
+        st.error("Need ≥2 projects to train the customized model (select projects first).")
     else:
-        # ------------------------------------------------------------------
-        # 1. Build X / y – keep **only rows that have ALL selected features**
-        # ------------------------------------------------------------------
+        # -------------------------
+        # DEFAULT DB MODEL
+        # -------------------------
+        default_X_cols = ['amenity_score', 'road_numeric']
+        df_default = project_df[project_df[cluster_type] == selected_cluster].copy().reset_index(drop=True)
+        df_default['road_numeric'] = df_default['Road_Category'].map(ROAD_MAP).fillna(2)
+        combined_def = df_default[default_X_cols + ['Mid_Rate']].dropna()
+
+        default_model_info = None
+        if len(combined_def) >= 2:
+            Xd = combined_def[default_X_cols]
+            yd = combined_def['Mid_Rate']
+            m_def = LinearRegression()
+            m_def.fit(Xd, yd)
+            pred_def = m_def.predict(Xd)
+            r2_def = r2_score(yd, pred_def)
+            eq_def_parts = [f"{c:.2f}×{n}" for c, n in zip(m_def.coef_, ['Amenity Score', 'Road Category'])]
+            eq_def = "Rate = " + " + ".join(eq_def_parts)
+            eq_def += f" + {m_def.intercept_:.0f}" if m_def.intercept_ >= 0 else f" – {abs(m_def.intercept_):.0f}"
+            default_model_info = {
+                'model': m_def,
+                'features': default_X_cols,
+                'display_features': ['Amenity Score', 'Road Category'],
+                'eq': eq_def,
+                'r2': r2_def,
+                'train_count': len(combined_def)
+            }
+
+        # -------------------------
+        # CUSTOMIZED MODEL (user-edited + chosen predictors)
+        # -------------------------
         X_cols = [feature_options[f] for f in selected_features]   # e.g. ['amenity_score','road_numeric',...]
         X_raw  = train_df[X_cols].copy()
         y      = train_df['Mid_Rate'].copy()
 
         combined = pd.concat([X_raw, y], axis=1).dropna()
         if len(combined) < 2:
-            st.error("Not enough complete rows after dropping NaNs.")
+            st.error("Not enough complete rows for customized model after dropping NaNs.")
             st.stop()
 
         X = combined[X_cols]
         y = combined['Mid_Rate']
 
-        # ------------------------------------------------------------------
-        # 2. **NO NORMALISATION** – feed raw data directly to the model
-        # ------------------------------------------------------------------
         model = LinearRegression()
         model.fit(X, y)
 
         pred = model.predict(X)
         r2   = r2_score(y, pred)
 
-        # ------------------------------------------------------------------
-        # 3. Build readable equation (coefficients are already on original scale)
-        # ------------------------------------------------------------------
         eq_parts = [f"{c:.2f}×{n}" for c, n in zip(model.coef_, selected_features)]
         eq = "Rate = " + " + ".join(eq_parts)
         eq += f" + {model.intercept_:.0f}" if model.intercept_ >= 0 else f" – {abs(model.intercept_):.0f}"
 
-        # ------------------------------------------------------------------
-        # 4. Store model + indices of rows that were actually used
-        # ------------------------------------------------------------------
-        st.session_state['model'] = {
-            'model'            : model,
-            'features'         : X_cols,
-            'display_features' : selected_features,
-            'eq'               : eq,
-            'r2'               : r2,
-            'train_idx'        : X.index.tolist()          # <-- only these rows
+        # Store both models
+        st.session_state['models'] = {
+            'default': default_model_info,
+            'custom': {
+                'model'            : model,
+                'features'         : X_cols,
+                'display_features' : selected_features,
+                'eq'               : eq,
+                'r2'               : r2,
+                'train_idx'        : X.index.tolist(),
+                'train_count'      : len(combined)
+            }
         }
 
-        # ------------------------------------------------------------------
-        # 5. UI – success + metrics + plot
-        # ------------------------------------------------------------------
-        st.success(f"Trained on **{len(combined)}** projects | R² = {r2:.4f}")
+        # For compatibility, also keep 'model' as the customized model
+        st.session_state['model'] = st.session_state['models']['custom']
+
+        # -------------------------
+        # UI: show summaries for both
+        # -------------------------
+        st.success(f"Customized model: Trained on **{len(combined)}** projects | R² = {r2:.4f}")
         c1, c2 = st.columns(2)
-        c1.metric("R² Score", f"{r2:.4f}")
+        c1.metric("Customized R²", f"{r2:.4f}")
         c2.code(eq)
 
+        if default_model_info:
+            st.info(f"Default DB model: Trained on **{default_model_info['train_count']}** DB projects using Amenity + Road | R² = {default_model_info['r2']:.4f}")
+            st.code(default_model_info['eq'])
+        else:
+            st.warning("Default DB model could not be trained (insufficient DB rows with complete Amenity+Road data).")
+
+        # Plot customized model actual vs predicted
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=y, y=pred, mode='markers',
@@ -516,56 +659,50 @@ if st.button("Train Model", type="primary", use_container_width=True):
             mode='lines', line=dict(dash='dash', color='red')
         ))
         fig.update_layout(
-            title="Actual vs Predicted (training data)",
+            title="Actual vs Predicted (customized training data)",
             xaxis_title="Actual Rate", yaxis_title="Predicted Rate",
             height=500
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # ------------------------------------------------------------------
-        # 6. **Toggle Table** – *only* the projects that were used for training
-        # ------------------------------------------------------------------
-        with st.expander("Training Projects (strictly used for model)", expanded=False):
+        # Training projects expander (customized)
+        with st.expander("Training Projects (strictly used for customized model)", expanded=False):
             train_used = train_df.loc[X.index].copy()
-
-            # Show only the columns that were actually fed to the model
             cols_to_show = ['Project_ID', 'Project_Name', 'Mid_Rate'] + X_cols
             train_used = train_used[cols_to_show]
-
-            # Human-readable column names
-            rename_map = {
-                'Project_ID' : 'ID',
-                'Project_Name': 'Project',
-                'Mid_Rate'   : 'Rate (₹/sqft)'
-            }
+            rename_map = {'Project_ID': 'ID', 'Project_Name': 'Project', 'Mid_Rate': 'Rate (₹/sqft)'}
             display_to_col = {v: k for k, v in feature_options.items()}
             for col in X_cols:
                 rename_map[col] = display_to_col.get(col, col.replace('_', ' ').title())
             train_used.rename(columns=rename_map, inplace=True)
-
-            # Formatting
             fmt_dict = {c: "{:,.0f}" for c in train_used.columns if "Rate" in c}
             fmt_dict.update({c: "{:.3f}" for c in train_used.columns if c in ["Amenity Score", "CBD Score"]})
             fmt_dict.update({c: "{:.1f}" for c in train_used.columns if "Age" in c})
-
-            st.dataframe(
-                train_used.style.format(fmt_dict),
-                use_container_width=True,
-                hide_index=True
-            )
+            st.dataframe(train_used.style.format(fmt_dict), use_container_width=True, hide_index=True)
             st.caption(f"**{len(train_used)}** projects were *actually* used (rows with any missing feature were dropped).")
             
 # --- 6. Predict Subject Rate ---
 st.markdown("<div class='subsection'>6. Predict Subject Rate</div>", unsafe_allow_html=True)
 
-if "model" not in st.session_state:
-    st.info("Train a model to enable prediction.")
+if "models" not in st.session_state:
+    st.info("Train a model to enable prediction. After training you'll see both: (A) default DB model and (B) customized model.")
 else:
-    model_info = st.session_state["model"]
-    if "run_id" not in st.session_state: 
+    models = st.session_state.get("models", {})
+    custom_model_info = models.get('custom')
+    default_model_info = models.get('default')
+    if "run_id" not in st.session_state:
         st.session_state.run_id = 0
 
-    cols = st.columns(min(len(model_info["features"]), 4))
+    # Build UI inputs combining features used by either model. We'll expose manual inputs for non-computed features.
+    # Collect unique feature columns across both models to build input widgets.
+    feat_cols = set()
+    if default_model_info:
+        feat_cols.update(default_model_info['features'])
+    if custom_model_info:
+        feat_cols.update(custom_model_info['features'])
+    feat_cols = list(feat_cols)
+
+    cols = st.columns(min(max(1, len(feat_cols)), 4))
     inputs = {}
     phs = {}
     name_map = {
@@ -576,34 +713,18 @@ else:
         "Age_Of_The_Building_Till_11thOct2025": "Age (years)"
     }
 
-    for i, col in enumerate(model_info["features"]):
+    for i, col in enumerate(feat_cols):
         with cols[i % len(cols)]:
             name = name_map.get(col, col.replace("_", " ").title())
-
-            # COMPUTED FIELDS
             if col in ["amenity_score", "cbd_score", "road_numeric"]:
                 ph = st.empty()
                 phs[col] = ph
-                ph.text_input(
-                    f"**{name}** (computed)",
-                    value="—",
-                    disabled=True,
-                    key=f"ph_{col}_{st.session_state.run_id}"
-                )
+                ph.text_input(f"**{name}** (computed)", value="—", disabled=True, key=f"ph_{col}_{st.session_state.run_id}")
             else:
-                # MANUAL INPUT FIELDS
                 default_val = st.session_state.get(f"inp_{col}", 2500.0 if "fsi" in col else 5.0)
                 step_val = 0.1 if "Age" in name else 100.0
                 format_str = "%.1f" if "Age" in name else "%.0f"
-
-                val = st.number_input(
-                    f"**{name}**",
-                    min_value=0.0,
-                    value=float(default_val),
-                    step=float(step_val),
-                    format=format_str,
-                    key=f"inp_{col}"
-                )
+                val = st.number_input(f"**{name}**", min_value=0.0, value=float(default_val), step=float(step_val), format=format_str, key=f"inp_{col}")
                 inputs[col] = val
 
     # ------------------------------------------------------------------
@@ -693,9 +814,27 @@ else:
                 "total fsi (sqmtr)": inputs.get("total fsi (sqmtr)", 2500.0),
                 "Age_Of_The_Building_Till_11thOct2025": inputs.get("Age_Of_The_Building_Till_11thOct2025", 5.0)
             }
-            X_sub = [vec.get(c, 0.0) for c in model_info["features"]]
-            pred_rate = model_info["model"].predict([X_sub])[0]
-            pred_cat = categorize_rate(pred_rate, rate_ranges)
+            # Predict with default model (DB) if available
+            pred_rate_def = None
+            pred_cat_def = None
+            if default_model_info:
+                X_sub_def = [vec.get(c, 0.0) for c in default_model_info['features']]
+                try:
+                    pred_rate_def = default_model_info['model'].predict([X_sub_def])[0]
+                    pred_cat_def = categorize_rate(pred_rate_def, rate_ranges)
+                except Exception:
+                    pred_rate_def = None
+
+            # Predict with customized model
+            pred_rate_cust = None
+            pred_cat_cust = None
+            if custom_model_info:
+                X_sub_cust = [vec.get(c, 0.0) for c in custom_model_info['features']]
+                try:
+                    pred_rate_cust = custom_model_info['model'].predict([X_sub_cust])[0]
+                    pred_cat_cust = categorize_rate(pred_rate_cust, rate_ranges)
+                except Exception:
+                    pred_rate_cust = None
 
         # --------------------------------------------------------------
         # UPDATE COMPUTED FIELDS
@@ -715,14 +854,26 @@ else:
                 )
 
         # --------------------------------------------------------------
-        # DISPLAY RESULTS
+        # DISPLAY RESULTS (both models)
         # --------------------------------------------------------------
-        st.success(f"**Predicted Rate: ₹{pred_rate:,.0f}/sqft on Salable Area**")
-        st.caption(f"**Market Segment:** {pred_cat}")
-        st.code(model_info["eq"], language="latex")
+        st.markdown("#### Prediction results")
+        cols_out = st.columns(2)
+        if pred_rate_def is not None:
+            cols_out[0].metric("Default (DB) Predicted Rate", f"₹{pred_rate_def:,.0f}/sqft")
+            cols_out[0].caption(f"Model R²: {default_model_info['r2']:.4f} | Trained on {default_model_info['train_count']} DB projects")
+            cols_out[0].code(default_model_info['eq'])
+        else:
+            cols_out[0].info("Default DB model not available for prediction.")
+
+        if pred_rate_cust is not None:
+            cols_out[1].metric("Customized Predicted Rate", f"₹{pred_rate_cust:,.0f}/sqft")
+            cols_out[1].caption(f"Model R²: {custom_model_info['r2']:.4f} | Trained on {custom_model_info['train_count']} projects")
+            cols_out[1].code(custom_model_info['eq'])
+        else:
+            cols_out[1].info("Customized model not available for prediction.")
 
         # --------------------------------------------------------------
-        # SUBJECT ATTRIBUTES TABLE
+        # SUBJECT ATTRIBUTES TABLE (show attributes used by either model)
         # --------------------------------------------------------------
         st.markdown("#### Subject Location Attributes")
         attr_rows = []
@@ -733,17 +884,32 @@ else:
             "total fsi (sqmtr)": ("Total FSI (sqm)", f"{vec['total fsi (sqmtr)']:.0f}"),
             "Age_Of_The_Building_Till_11thOct2025": ("Age (years)", f"{vec['Age_Of_The_Building_Till_11thOct2025']:.1f}")
         }
-        for col in model_info["features"]:
+        # union of features
+        used_features = []
+        if default_model_info:
+            used_features += default_model_info['features']
+        if custom_model_info:
+            used_features += custom_model_info['features']
+        # keep order and uniqueness
+        seen = set()
+        used_features = [x for x in used_features if not (x in seen or seen.add(x))]
+
+        for col in used_features:
             if col in display_map:
                 attr_rows.append({"Attribute": display_map[col][0], "Value": display_map[col][1]})
+            else:
+                # If it's a custom attribute, try to show its value
+                val = vec.get(col, None) if col in vec else None
+                # If not in vec, try reading from subject inputs
+                if val is None:
+                    val = inputs.get(col, None)
+                if val is not None:
+                    attr_rows.append({"Attribute": col.replace('_', ' ').title(), "Value": f"{val}"})
+
         if attr_rows:
-            st.dataframe(
-                pd.DataFrame(attr_rows),
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Attribute": st.column_config.TextColumn(width="medium"),
-                               "Value": st.column_config.TextColumn(width="small")}
-            )
+            st.dataframe(pd.DataFrame(attr_rows), use_container_width=True, hide_index=True,
+                         column_config={"Attribute": st.column_config.TextColumn(width="medium"),
+                                        "Value": st.column_config.TextColumn(width="small")})
         else:
             st.info("No model features to display.")
 
