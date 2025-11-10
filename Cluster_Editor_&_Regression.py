@@ -551,7 +551,46 @@ for a in st.session_state.get('custom_attributes', []):
 cluster_df['road_numeric'] = cluster_df['Road_Category'].map(ROAD_MAP).fillna(2)
 cluster_df['Mid_Rate'] = cluster_df['Rate_on_Salable']
 st.session_state[cluster_key] = cluster_df
-st.session_state[f"selected_{cluster_key}"] = edited_df[edited_df['Select']].index.tolist()
+
+# Validate manual selection: if user selected rows that have NaNs for any of the currently
+# chosen predictors, remove those rows from the selection and warn the user to fill them.
+raw_selected = edited_df[edited_df['Select']].index.tolist()
+validated_selected = raw_selected.copy()
+feats = st.session_state.get('feat_sel', [])
+if feats:
+    # Map display names -> actual column names (feature_options maps display->col)
+    feat_map = feature_options if 'feature_options' in locals() else BASE_FEATURE_OPTIONS
+    check_cols = [feat_map.get(f) for f in feats if feat_map.get(f)]
+    # Only proceed if we have actual column names to check
+    if check_cols:
+        missing_rows = {}
+        for idx in raw_selected:
+            missing = []
+            for col in check_cols:
+                # If column doesn't exist on cluster_df, treat as missing
+                if col not in cluster_df.columns or pd.isna(cluster_df.loc[idx, col]):
+                    # Resolve display name (prefer the predictor display label)
+                    disp = next((k for k, v in feature_options.items() if v == col), col)
+                    missing.append(disp)
+            if missing:
+                missing_rows[idx] = missing
+
+        if missing_rows:
+            # Remove problematic rows from selection
+            validated_selected = [i for i in raw_selected if i not in missing_rows]
+            st.session_state[f"selected_{cluster_key}"] = validated_selected
+
+            # Build a readable warning listing project names and missing attributes
+            lines = []
+            for i, miss in missing_rows.items():
+                proj = cluster_df.loc[i, 'Project_Name'] if 'Project_Name' in cluster_df.columns else str(i)
+                lines.append(f"• {proj}: missing {', '.join(miss)}")
+            st.warning("Some selected projects have missing values for the chosen predictors and were not selected:\n" + "\n".join(lines))
+        else:
+            st.session_state[f"selected_{cluster_key}"] = validated_selected
+else:
+    st.session_state[f"selected_{cluster_key}"] = validated_selected
+
 train_df = cluster_df.loc[st.session_state[f"selected_{cluster_key}"]].copy()
 
 # --- 5. Train Regression Model ---
