@@ -196,14 +196,19 @@ def plot_selected_cluster_map(df, cluster_col, cluster_val, subject_lat=None, su
     fig = go.Figure()
 
     if not filtered.empty:
-        hover = filtered.apply(lambda r: f"<b>{r['Project_Name']}</b><br>Rate: ₹{r['Mid_Rate']:,.0f}/sqft<br>{r.get('Village', '—')}", axis=1)
+        hover = filtered.apply(lambda r: "<b>{}</b><br>Rate (on Salable area): ₹{:,}/sqft<br>Total FSI (total constructed area): {:,} sqm<br>Neighbourhood Amenity Score: {:.3f}<br>{}".format(
+                r['Project_Name'],
+                int(r['Mid_Rate']) if not pd.isna(r['Mid_Rate']) else 0,
+                int(r.get('total fsi (sqmtr)')) if (r.get('total fsi (sqmtr)') is not None and not pd.isna(r.get('total fsi (sqmtr)'))) else '—',
+                r.get('amenity_score', 0.0) if not pd.isna(r.get('amenity_score', np.nan)) else 0.0,
+                r.get('Village', '—')
+            ), axis=1)
         fig.add_trace(go.Scattermapbox(
             lat=filtered['project_lat'], lon=filtered['project_lng'],
             mode='markers', marker=dict(size=14, color=filtered['Mid_Rate'], colorscale='Viridis',
-                                        showscale=True, colorbar=dict(title="Rate (₹/sqft)", x=1.02)),
+                                        showscale=True, colorbar=dict(title="Rate (₹/sqft on salable area)", x=1.02)),
             text=hover, hovertemplate='%{text}<extra></extra>', name='Projects'
-        ))
-
+        ))       
         pts = filtered[['project_lng', 'project_lat']].values
         if len(pts) >= 3:
             try:
@@ -263,7 +268,12 @@ with st.sidebar:
     st.markdown("## Configuration")
 
     with st.expander("Amenity Weights", expanded=True):
-        st.caption("Adjust relative impact of proximity to key amenities.")
+        st.caption("""
+        Adjust the relative importance of different amenities in calculating the Neighbourhood Amenity Score.
+        Higher weights give more importance to those amenities.
+        The amenity score considers only amenities within 1 km, with closer ones having more impact.
+        Total weights don't need to sum to 1.0 - they're relative proportions.
+        """)
         if 'custom_weights' not in st.session_state: st.session_state.custom_weights = DEFAULT_WEIGHTS.copy()
         weights = {}
         for cat, val in DEFAULT_WEIGHTS.items():
@@ -272,9 +282,13 @@ with st.sidebar:
         st.markdown(f"<div class='metric-card'>Total: {sum(weights.values()):.2f}</div>", unsafe_allow_html=True)
 
     with st.expander("Rate Segmentation", expanded=False):
-        st.caption("Define rate bands for market categorization.")
+        st.caption("""
+        Define rate bands for market categorization (₹/sqft on salable area).
+        These thresholds help classify projects into market segments based on their rates.
+        Adjust them according to your local market conditions.
+        """)
         if 'rate_ranges' not in st.session_state: st.session_state.rate_ranges = DEFAULT_RATE_RANGES.copy()
-        r1 = st.number_input("Affordable up to (₹/sqft)", value=st.session_state.rate_ranges["Affordable"][1], step=500)
+        r1 = st.number_input("Affordable up to (₹/sqft on salable area)", value=st.session_state.rate_ranges["Affordable"][1], step=500)
         r3 = st.number_input("Mid-Segment up to (₹/sqft)", value=st.session_state.rate_ranges["Mid-Segment"][1], step=500)
         updated = {"Affordable": (0, r1), "Mid-Segment": (r1, r3), "Luxury": (r3, float('inf'))}
         st.session_state.rate_ranges = updated
@@ -304,12 +318,26 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Model Features")
+    
+    # Add helpful descriptions for each feature
+    st.markdown("""
+    <div class='caption'>
+    🎯 <b>Guide to Model Features:</b>
+    <ul style='margin-top:0.5rem; padding-left:1.2rem; font-size:0.9rem'>
+        <li><b>Neighbourhood Amenity Score</b>: Measures access to amenities within 1 km (metro, bus, malls, schools, hospitals, gardens)</li>
+        <li><b>Road Category</b>: A (<12m), B (12-18m), C (18-30m), D (30-75m) - wider roads typically mean better rates</li>
+        <li><b>Total FSI</b>: Total constructed area in square meters across all floors - captures project scale</li>
+        <li><b>Age</b>: Building age in years (as of Oct 2025) - newer properties often command higher rates</li>
+        <li><b>CBD Score</b>: Proximity to nearest CBD based on drive time/distance - indicates business district access</li>
+    </ul>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Base feature options (display name -> column name)
     BASE_FEATURE_OPTIONS = {
-        "Amenity Score": "amenity_score",
+        "Neighbourhood Amenity Score": "amenity_score",
         "Road Category": "road_numeric",
-        "Total FSI": "total fsi (sqmtr)",
+        "Total FSI (constructed area)": "total fsi (sqmtr)",
         "Age": "Age_Of_The_Building_Till_11thOct2025",
         "CBD Score": "cbd_score"
     }
@@ -342,20 +370,23 @@ with st.sidebar:
                     # ensure cluster_df will also have it when (re)loaded below
                     st.success(f"Added attribute '{name}'. Enter numeric values in the table for each project.")
 
+    # Small help: explain Neighbourhood Amenity Score components
+    st.markdown("<small>ℹ️ <strong>Neighbourhood Amenity Score</strong>: uses nearby amenities within 1 km — schools, bus stops, metro stations, hospitals, gardens, malls, etc. You can adjust amenity weights in the 'Amenity Weights' expander.</small>", unsafe_allow_html=True)
+
     # Build full feature option map by merging base + custom attributes
     feature_options = BASE_FEATURE_OPTIONS.copy()
     for a in st.session_state.custom_attributes:
         feature_options[a['display']] = a['col']
 
     # Pre-select amenity + road by default; custom ones appear in the list
-    selected_features = st.multiselect("Predictors", list(feature_options.keys()), default=["Amenity Score", "Road Category"], key="feat_sel")
+    selected_features = st.multiselect("Predictors", list(feature_options.keys()), default=["Neighbourhood Amenity Score", "Road Category"], key="feat_sel")
 
 
 # ==============================================================
 # MAIN CONTENT
 # ==============================================================
 st.markdown("<div class='section-title'>Valuation Engine</div>", unsafe_allow_html=True)
-st.markdown("<div class='caption'>Micro-market rate prediction using location, infrastructure, and amenities.</div>", unsafe_allow_html=True)
+st.markdown("<div class='caption'>Predict property rates (₹/sqft on salable area) using micro-market comparables, considering location quality, infrastructure, and amenity access.</div>", unsafe_allow_html=True)
 
 # --- 1. Cluster & Subject ---
 st.markdown("<div class='subsection'>1. Cluster Type & Subject Location</div>", unsafe_allow_html=True)
@@ -462,7 +493,7 @@ def build_display_df(df, ranges):
     df['amenity_display'] = df['amenity_score'].apply(lambda x: f"{x:.3f}")
     df['cbd_display'] = df['cbd_score'].apply(lambda x: f"{x:.3f}")
     core = df[['Project_ID', 'Project_Name', 'Rate_on_Salable', 'Road_Category', 'amenity_display', 'cbd_display', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025', 'Category']].copy()
-    core.columns = ['ID', 'Project', 'Rate (₹/sqft)', 'Road', 'Amenity', 'CBD', 'FSI', 'Age', 'Segment']
+    core.columns = ['ID', 'Project', 'Rate (₹/sqft)', 'Road', 'Neighbourhood Amenity Score', 'CBD', 'Total FSI (sqm)', 'Age', 'Segment']
 
     # Append custom attributes (numeric) if present
     custom_cols = []
@@ -525,9 +556,9 @@ col_config = {
     "Project": st.column_config.TextColumn(disabled=True),
     "Rate (₹/sqft)": st.column_config.NumberColumn(format="₹%.0f"),
     "Road": st.column_config.SelectboxColumn(options=['A','B','C','D']),
-    "Amenity": st.column_config.TextColumn(disabled=True),
+    "Neighbourhood Amenity Score": st.column_config.TextColumn(disabled=True),
     "CBD": st.column_config.TextColumn(disabled=True),
-    "FSI": st.column_config.NumberColumn(format="%.0f"),
+    "Total FSI (sqm)": st.column_config.NumberColumn(format="%.0f"),
     "Age": st.column_config.NumberColumn(format="%.1f"),
     "Segment": st.column_config.TextColumn(disabled=True)
 }
@@ -540,7 +571,7 @@ edited_df = st.data_editor(display_df, num_rows="dynamic", use_container_width=T
     column_config=col_config, hide_index=True, key=f"editor_{cluster_key}")
 
 # Save edits
-cluster_df.loc[edited_df.index, ['Rate_on_Salable', 'Road_Category', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025']] = edited_df[['Rate (₹/sqft)', 'Road', 'FSI', 'Age']].values
+cluster_df.loc[edited_df.index, ['Rate_on_Salable', 'Road_Category', 'total fsi (sqmtr)', 'Age_Of_The_Building_Till_11thOct2025']] = edited_df[['Rate (₹/sqft)', 'Road', 'Total FSI (sqm)', 'Age']].values
 # Persist custom attribute edits back to cluster_df
 for a in st.session_state.get('custom_attributes', []):
     disp = a['display']
@@ -618,13 +649,13 @@ if st.button("Train Model", type="primary", use_container_width=True):
             m_def.fit(Xd, yd)
             pred_def = m_def.predict(Xd)
             r2_def = r2_score(yd, pred_def)
-            eq_def_parts = [f"{c:.2f}×{n}" for c, n in zip(m_def.coef_, ['Amenity Score', 'Road Category'])]
+            eq_def_parts = [f"{c:.2f}×{n}" for c, n in zip(m_def.coef_, ['Neighbourhood Amenity Score', 'Road Category'])]
             eq_def = "Rate = " + " + ".join(eq_def_parts)
             eq_def += f" + {m_def.intercept_:.0f}" if m_def.intercept_ >= 0 else f" – {abs(m_def.intercept_):.0f}"
             default_model_info = {
                 'model': m_def,
                 'features': default_X_cols,
-                'display_features': ['Amenity Score', 'Road Category'],
+                'display_features': ['Neighbourhood Amenity Score', 'Road Category'],
                 'eq': eq_def,
                 'r2': r2_def,
                 'train_count': len(combined_def)
@@ -679,9 +710,10 @@ if st.button("Train Model", type="primary", use_container_width=True):
         c1, c2 = st.columns(2)
         c1.metric("Customized R²", f"{r2:.4f}")
         c2.code(eq)
+        c2.caption("This customized model is trained on the selected predictors using the current table values (user edits applied). Rows with missing predictor values were dropped before training.")
 
         if default_model_info:
-            st.info(f"Default DB model: Trained on **{default_model_info['train_count']}** DB projects using Amenity + Road | R² = {default_model_info['r2']:.4f}")
+            st.info(f"Default DB model: Trained on **{default_model_info['train_count']}** DB projects using Neighbourhood Amenity Score + Road (DB data only) | R² = {default_model_info['r2']:.4f}")
             st.code(default_model_info['eq'])
         else:
             st.warning("Default DB model could not be trained (insufficient DB rows with complete Amenity+Road data).")
@@ -715,7 +747,7 @@ if st.button("Train Model", type="primary", use_container_width=True):
                 rename_map[col] = display_to_col.get(col, col.replace('_', ' ').title())
             train_used.rename(columns=rename_map, inplace=True)
             fmt_dict = {c: "{:,.0f}" for c in train_used.columns if "Rate" in c}
-            fmt_dict.update({c: "{:.3f}" for c in train_used.columns if c in ["Amenity Score", "CBD Score"]})
+            fmt_dict.update({c: "{:.3f}" for c in train_used.columns if c in ["Neighbourhood Amenity Score", "CBD Score"]})
             fmt_dict.update({c: "{:.1f}" for c in train_used.columns if "Age" in c})
             st.dataframe(train_used.style.format(fmt_dict), use_container_width=True, hide_index=True)
             st.caption(f"**{len(train_used)}** projects were *actually* used (rows with any missing feature were dropped).")
@@ -745,7 +777,7 @@ else:
     inputs = {}
     phs = {}
     name_map = {
-        "amenity_score": "Amenity Score",
+        "amenity_score": "Neighbourhood Amenity Score",
         "cbd_score": "CBD Score",
         "road_numeric": "Road Type",
         "total fsi (sqmtr)": "Total FSI (sqm)",
@@ -914,13 +946,25 @@ else:
         # --------------------------------------------------------------
         # SUBJECT ATTRIBUTES TABLE (show attributes used by either model)
         # --------------------------------------------------------------
-        st.markdown("#### Subject Location Attributes")
+        st.markdown("""
+        #### Subject Location Attributes
+        <div class='caption'>Key factors that influence property rates (hover over each attribute for more details)</div>
+        """, unsafe_allow_html=True)
+        # Define tooltips/descriptions for each attribute
+        tooltips = {
+            "Neighbourhood Amenity Score": "Score based on proximity to key amenities within 1 km (metro, bus, malls, schools, hospitals, gardens). Higher score = better accessibility.",
+            "CBD Score": "Proximity score to nearest CBD based on driving distance and time. 1.0 = excellent access, 0.0 = remote.",
+            "Road Type": "Road categories: A (<12m width), B (12-18m), C (18-30m), D (30-75m). Better roads = higher rates.",
+            "Total FSI (total constructed area)": "Total Floor Space Index (FSI) - the total constructed area in square meters, including all floors.",
+            "Age (years)": "Building age in years as of Oct 2025. New buildings typically command higher rates."
+        }
+
         attr_rows = []
         display_map = {
-            "amenity_score": ("Amenity Score", f"{amenity:.3f}"),
+            "amenity_score": ("Neighbourhood Amenity Score", f"{amenity:.3f}"),
             "cbd_score": ("CBD Score", f"{cbd:.3f}"),
             "road_numeric": ("Road Type", road_cat),
-            "total fsi (sqmtr)": ("Total FSI (sqm)", f"{vec['total fsi (sqmtr)']:.0f}"),
+            "total fsi (sqmtr)": ("Total FSI (total constructed area)", f"{vec['total fsi (sqmtr)']:,} sqm"),
             "Age_Of_The_Building_Till_11thOct2025": ("Age (years)", f"{vec['Age_Of_The_Building_Till_11thOct2025']:.1f}")
         }
         # union of features
@@ -946,9 +990,35 @@ else:
                     attr_rows.append({"Attribute": col.replace('_', ' ').title(), "Value": f"{val}"})
 
         if attr_rows:
-            st.dataframe(pd.DataFrame(attr_rows), use_container_width=True, hide_index=True,
-                         column_config={"Attribute": st.column_config.TextColumn(width="medium"),
-                                        "Value": st.column_config.TextColumn(width="small")})
+            # Create DataFrame with attributes and add tooltips
+            df = pd.DataFrame(attr_rows)
+            
+            # Pre-compute help text for each attribute
+            help_texts = {
+                "Attribute": "Factors that influence property rates",
+                "Value": "Current value for this attribute"
+            }
+            for attr_row in attr_rows:
+                attr_name = attr_row["Attribute"]
+                if attr_name in tooltips:
+                    help_texts[attr_name] = tooltips[attr_name]
+
+            st.dataframe(df, use_container_width=True, hide_index=True,
+                        column_config={
+                            "Attribute": st.column_config.TextColumn(
+                                width="medium",
+                                help=help_texts["Attribute"]
+                            ),
+                            "Value": st.column_config.TextColumn(
+                                width="small",
+                                help=help_texts["Value"]
+                            )
+                        })
+            
+            # Show the explanations as text below instead
+            with st.expander("ℹ️ Attribute Explanations", expanded=False):
+                for attr_name, explanation in tooltips.items():
+                    st.markdown(f"**{attr_name}**: {explanation}")
         else:
             st.info("No model features to display.")
 
@@ -993,7 +1063,7 @@ else:
                 use_container_width=True,
                 hide_index=True
             )
-            st.caption(f"**Total amenities:** {len(amenity_df)} | **Amenity Score:** {amenity:.3f}")
+            st.caption(f"**Total amenities:** {len(amenity_df)} | **Neighbourhood Amenity Score:** {amenity:.3f}")
         else:
             st.info("No amenities found within 1 km.")
 
