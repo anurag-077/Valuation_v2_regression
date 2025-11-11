@@ -94,6 +94,8 @@ CBD_MASTER = [
     {"name": "Chinchwad", "lat": 18.6297, "lng": 73.7850, "area": "PCMC"},
 ]
 OSRM_URL = "http://router.project-osrm.org/route/v1/driving/"
+# Default CBD weighting (distance vs time)
+DEFAULT_CBD_WEIGHTS = (0.6, 0.4)
 
 # ==============================================================
 # HELPERS
@@ -163,20 +165,43 @@ def get_fastest_route(start_lng, start_lat, end_lng, end_lat) -> Dict:
     except: pass
     return {}
 
-def calculate_cbd_score(dist_km: float, time_min: float) -> float:
+def calculate_cbd_score(dist_km: float, time_min: float, w_dist: float = 0.6, w_time: float = 0.4) -> float:
+    """
+    Calculate a CBD access score from distance (km) and travel time (min).
+
     score_dist = 1 / (1 + dist_km / 10)
     score_time = 1 / (1 + time_min / 30)
-    return round(0.6 * score_dist + 0.4 * score_time, 3)
+    combined = w_dist * score_dist + w_time * score_time
+
+    The weights (w_dist, w_time) are user-adjustable in the UI. If their sum
+    isn't 1 we normalize them so the effective contribution is proportional.
+    """
+    # normalize weights so they sum to 1 (guard against bad input)
+    sumw = float(w_dist) + float(w_time)
+    if sumw <= 0:
+        w_d, w_t = 0.6, 0.4
+    else:
+        w_d, w_t = float(w_dist) / sumw, float(w_time) / sumw
+
+    score_dist = 1 / (1 + dist_km / 10)
+    score_time = 1 / (1 + time_min / 30)
+    return round(w_d * score_dist + w_t * score_time, 3)
 
 @st.cache_data(show_spinner=False)
-def cbd_score_for_project(lat: float, lng: float) -> float:
+def cbd_score_for_project(lat: float, lng: float, w_dist: float = 0.6, w_time: float = 0.4) -> float:
+    """
+    Compute the best CBD score for a project location using configurable weights.
+
+    The weights (w_dist, w_time) are passed through to calculate_cbd_score so
+    that the user can customize how much distance vs drive-time matters.
+    """
     best = 0.0
     for cbd in CBD_MASTER:
         route = get_fastest_route(lng, lat, cbd["lng"], cbd["lat"])
         if not route: continue
         dist_km = route["distance"] / 1000
         time_min = route["duration"] / 60
-        score = calculate_cbd_score(dist_km, time_min)
+        score = calculate_cbd_score(dist_km, time_min, w_dist, w_time)
         best = max(best, score)
     return best
 
@@ -184,7 +209,10 @@ def calculate_cbd_for_selected(df: pd.DataFrame, selected_idx: List[int]) -> pd.
     if not selected_idx: return df
     df = df.copy()
     with st.spinner(f"Calculating CBD for {len(selected_idx)} project(s)…"):
-        scores = [cbd_score_for_project(df.loc[i, 'project_lat'], df.loc[i, 'project_lng']) for i in selected_idx]
+        # read user-selected CBD weights from session (fallback to defaults)
+        w_dist = st.session_state.get('cbd_w_dist', DEFAULT_CBD_WEIGHTS[0])
+        w_time = st.session_state.get('cbd_w_time', DEFAULT_CBD_WEIGHTS[1])
+        scores = [cbd_score_for_project(df.loc[i, 'project_lat'], df.loc[i, 'project_lng'], w_dist, w_time) for i in selected_idx]
         df.loc[selected_idx, 'cbd_score'] = scores
     return df
 
@@ -315,6 +343,18 @@ with st.sidebar:
 
     active_weights = st.session_state.custom_weights
     rate_ranges = st.session_state.rate_ranges
+
+    # CBD weighting controls (distance vs time)
+    with st.expander("CBD Weighting (distance vs time)", expanded=False):
+        if 'cbd_w_dist' not in st.session_state:
+            st.session_state['cbd_w_dist'] = DEFAULT_CBD_WEIGHTS[0]
+            st.session_state['cbd_w_time'] = DEFAULT_CBD_WEIGHTS[1]
+        w_dist = st.slider("Distance weight (relative)", 0.0, 1.0, st.session_state['cbd_w_dist'], 0.05, key="cbd_w_dist")
+        # keep time weight as complement (simpler UX)
+        w_time = round(1.0 - w_dist, 3)
+        st.session_state['cbd_w_time'] = w_time
+        st.caption(f"Combined CBD score = distance_score × {w_dist:.2f}  +  time_score × {w_time:.2f} (default {DEFAULT_CBD_WEIGHTS[0]:.2f}/{DEFAULT_CBD_WEIGHTS[1]:.2f})")
+        st.markdown("<small>distance_score = 1 / (1 + dist_km / 10); time_score = 1 / (1 + time_min / 30). Adjust weights to emphasize distance vs drive time.</small>", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### Model Features")
@@ -850,7 +890,10 @@ else:
                 if not route: continue
                 dist_km  = route["distance"] / 1000
                 time_min = route["duration"] / 60
-                score = calculate_cbd_score(dist_km, time_min)
+                # use user-configured CBD weights (fallback to defaults)
+                w_dist = st.session_state.get('cbd_w_dist', DEFAULT_CBD_WEIGHTS[0])
+                w_time = st.session_state.get('cbd_w_time', DEFAULT_CBD_WEIGHTS[1])
+                score = calculate_cbd_score(dist_km, time_min, w_dist, w_time)
 
                 cbd_details.append({
                     "CBD Name": cbd["name"],
@@ -1026,6 +1069,10 @@ else:
         # CBD DETAILS TABLE (NEW)
         # --------------------------------------------------------------
         st.markdown("#### CBD Score Calculation")
+        # show which weights were used for the combined score (distance vs time)
+        w_dist = st.session_state.get('cbd_w_dist', DEFAULT_CBD_WEIGHTS[0])
+        w_time = st.session_state.get('cbd_w_time', DEFAULT_CBD_WEIGHTS[1])
+        st.caption(f"Calculation: distance_score = 1/(1+dist_km/10); time_score = 1/(1+time_min/30); combined = {w_dist:.2f}×distance_score + {w_time:.2f}×time_score")
         if cbd_details:
             cbd_df = pd.DataFrame(cbd_details)
             # Highlight the best CBD
